@@ -9,6 +9,7 @@ from qtrader.backend.config import settings
 from qtrader.backend.api.data import router as data_router
 from qtrader.backend.api.training import router as training_router
 from qtrader.backend.api.trading import router as trading_router
+from qtrader.backend.api.predict import router as predict_router
 from qtrader.backend.api.ws import router as ws_router
 
 
@@ -42,6 +43,7 @@ app.add_middleware(
 app.include_router(data_router, prefix="/api/data", tags=["Data"])
 app.include_router(training_router, prefix="/api", tags=["Training"])
 app.include_router(trading_router, prefix="/api/trade", tags=["Trading"])
+app.include_router(predict_router, prefix="/api/predict", tags=["Predict"])
 app.include_router(ws_router, tags=["WebSocket"])
 
 

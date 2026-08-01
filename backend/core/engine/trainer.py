@@ -143,6 +143,147 @@ MODEL_REGISTRY: dict[str, dict] = {
         "module_path": "qlib.contrib.model.linear",
         "default_kwargs": {},
     },
+    "DEnsembleModel": {
+        "class": "DEnsembleModel",
+        "module_path": "qlib.contrib.model.double_ensemble",
+        "default_kwargs": {
+            "base_model": "gbm",
+            "loss": "mse",
+            "num_models": 6,
+            "enable_sr": True,
+            "enable_fs": True,
+            "decay": 0.5,
+            "epochs": 100,
+        },
+    },
+    "GRU": {
+        "class": "GRU",
+        "module_path": "qlib.contrib.model.pytorch_gru",
+        "default_kwargs": {
+            "d_feat": 158,
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.0,
+            "n_epochs": 200,
+            "lr": 0.001,
+            "batch_size": 2000,
+            "early_stop": 20,
+            "GPU": -1,
+        },
+    },
+    "LSTM": {
+        "class": "LSTM",
+        "module_path": "qlib.contrib.model.pytorch_lstm",
+        "default_kwargs": {
+            "d_feat": 158,
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.0,
+            "n_epochs": 200,
+            "lr": 0.001,
+            "batch_size": 2000,
+            "early_stop": 20,
+            "GPU": -1,
+        },
+    },
+    "ALSTM": {
+        "class": "ALSTM",
+        "module_path": "qlib.contrib.model.pytorch_alstm",
+        "default_kwargs": {
+            "d_feat": 158,
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.0,
+            "n_epochs": 200,
+            "lr": 0.001,
+            "batch_size": 2000,
+            "early_stop": 20,
+            "GPU": -1,
+        },
+    },
+    "TransformerModel": {
+        "class": "TransformerModel",
+        "module_path": "qlib.contrib.model.pytorch_transformer",
+        "default_kwargs": {
+            "d_feat": 158,
+            "d_model": 64,
+            "nhead": 2,
+            "num_layers": 2,
+            "dropout": 0.0,
+            "n_epochs": 200,
+            "lr": 0.0001,
+            "batch_size": 2048,
+            "early_stop": 5,
+            "GPU": -1,
+        },
+    },
+    "TCN": {
+        "class": "TCN",
+        "module_path": "qlib.contrib.model.pytorch_tcn",
+        "default_kwargs": {
+            "d_feat": 158,
+            "n_chans": 128,
+            "kernel_size": 5,
+            "num_layers": 5,
+            "dropout": 0.5,
+            "n_epochs": 200,
+            "lr": 0.0001,
+            "batch_size": 2000,
+            "early_stop": 20,
+            "GPU": -1,
+        },
+    },
+    "TabnetModel": {
+        "class": "TabnetModel",
+        "module_path": "qlib.contrib.model.pytorch_tabnet",
+        "default_kwargs": {
+            "d_feat": 158,
+            "n_epochs": 200,
+            "lr": 0.001,
+            "batch_size": 2000,
+            "early_stop": 20,
+            "GPU": -1,
+        },
+    },
+    "DNNModelPytorch": {
+        "class": "DNNModelPytorch",
+        "module_path": "qlib.contrib.model.pytorch_nn",
+        "default_kwargs": {
+            "lr": 0.001,
+            "optimizer": "adam",
+            "GPU": -1,
+        },
+    },
+    "GATs": {
+        "class": "GATs",
+        "module_path": "qlib.contrib.model.pytorch_gats",
+        "default_kwargs": {
+            "d_feat": 158,
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.0,
+            "n_epochs": 200,
+            "lr": 0.001,
+            "early_stop": 20,
+            "base_model": "GRU",
+            "GPU": -1,
+        },
+    },
+    "SFM_Model": {
+        "class": "SFM_Model",
+        "module_path": "qlib.contrib.model.pytorch_sfm",
+        "default_kwargs": {
+            "d_feat": 158,
+            "hidden_size": 64,
+            "output_dim": 32,
+            "freq_dim": 25,
+            "n_epochs": 200,
+            "lr": 0.001,
+            "batch_size": 2000,
+            "early_stop": 20,
+            "GPU": -1,
+        },
+    },
 }
 
 HANDLER_REGISTRY: dict[str, dict] = {
@@ -379,44 +520,48 @@ class Trainer:
             sar.generate()
             job.update_progress(75, "信号分析完成")
 
-            # 组合回测分析
+            # 组合回测分析（可能因 qlib 版本兼容性问题失败，不影响模型训练结果）
             job.update_progress(76, "正在执行组合回测分析 ...")
-            port_analysis_config = {
-                "executor": {
-                    "class": "SimulatorExecutor",
-                    "module_path": "qlib.backtest.executor",
-                    "kwargs": {
-                        "time_per_step": "day",
-                        "generate_portfolio_metrics": True,
+            try:
+                port_analysis_config = {
+                    "executor": {
+                        "class": "SimulatorExecutor",
+                        "module_path": "qlib.backtest.executor",
+                        "kwargs": {
+                            "time_per_step": "day",
+                            "generate_portfolio_metrics": True,
+                        },
                     },
-                },
-                "strategy": {
-                    "class": "TopkDropoutStrategy",
-                    "module_path": "qlib.contrib.strategy.signal_strategy",
-                    "kwargs": {
-                        "signal": (model, dataset),
-                        "topk": 50,
-                        "n_drop": 5,
+                    "strategy": {
+                        "class": "TopkDropoutStrategy",
+                        "module_path": "qlib.contrib.strategy.signal_strategy",
+                        "kwargs": {
+                            "signal": (model, dataset),
+                            "topk": 50,
+                            "n_drop": 5,
+                        },
                     },
-                },
-                "backtest": {
-                    "start_time": config.test_range[0],
-                    "end_time": config.test_range[1],
-                    "account": 100000000,
-                    "benchmark": "SH000300",
-                    "exchange_kwargs": {
-                        "freq": "day",
-                        "limit_threshold": 0.095,
-                        "deal_price": "close",
-                        "open_cost": 0.0005,
-                        "close_cost": 0.0015,
-                        "min_cost": 5,
+                    "backtest": {
+                        "start_time": config.test_range[0],
+                        "end_time": config.test_range[1],
+                        "account": 100000000,
+                        "benchmark": "SH000300",
+                        "exchange_kwargs": {
+                            "freq": "day",
+                            "limit_threshold": 0.095,
+                            "deal_price": "close",
+                            "open_cost": 0.0005,
+                            "close_cost": 0.0015,
+                            "min_cost": 5,
+                        },
                     },
-                },
-            }
-            par = PortAnaRecord(recorder, port_analysis_config, "day")
-            par.generate()
-            job.update_progress(90, "组合回测分析完成")
+                }
+                par = PortAnaRecord(recorder, port_analysis_config, "day")
+                par.generate()
+                job.update_progress(90, "组合回测分析完成")
+            except Exception as bt_err:
+                logger.warning(f"组合回测分析失败（不影响模型训练）: {bt_err}")
+                job.update_progress(90, f"组合回测跳过（{type(bt_err).__name__}），模型训练已完成")
 
         # 提取真实回测指标
         metrics = self._extract_metrics(recorder)
@@ -573,6 +718,16 @@ class Trainer:
 
     def list_jobs(self) -> list[TrainJob]:
         return list(self._jobs.values())
+
+    def delete_job(self, job_id: str) -> bool:
+        """删除训练任务（内存 + 持久化）"""
+        job = self._jobs.pop(job_id, None)
+        if self._store:
+            try:
+                self._store.delete_job(job_id)
+            except Exception:
+                pass
+        return job is not None
 
 
 # 全局单例

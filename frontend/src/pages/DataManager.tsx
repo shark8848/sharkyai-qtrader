@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react'
-import { Card, Select, Table, Input, Button, Space, Tag, message } from 'antd'
-import { SyncOutlined, SearchOutlined } from '@ant-design/icons'
+import { useState, useEffect, useRef } from 'react'
+import { Card, Select, Table, Input, Button, Space, Tag, message, Progress, Alert } from 'antd'
+import { SyncOutlined, SearchOutlined, CloudSyncOutlined } from '@ant-design/icons'
 import axios from 'axios'
 
 interface DataSource {
@@ -23,6 +23,11 @@ export default function DataManager() {
   const [total, setTotal] = useState(0)
   const [keyword, setKeyword] = useState('')
   const [loading, setLoading] = useState(false)
+  const [pagination, setPagination] = useState({ current: 1, pageSize: 20 })
+
+  // Qlib 同步状态
+  const [syncStatus, setSyncStatus] = useState<any>(null)
+  const syncPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     fetchSources()
@@ -41,6 +46,7 @@ export default function DataManager() {
 
   const fetchStocks = async () => {
     setLoading(true)
+    setPagination(prev => ({ ...prev, current: 1 }))
     try {
       const params: any = {}
       if (keyword) params.keyword = keyword
@@ -59,12 +65,48 @@ export default function DataManager() {
     message.success(`已切换到 ${sourceId}`)
   }
 
+  // === Qlib 同步 ===
+  const startQlibSync = async () => {
+    try {
+      const res = await axios.post('/api/data/sync_qlib', null, { params: { market: 'all' } })
+      if (res.data.error) {
+        message.warning(res.data.error)
+        return
+      }
+      message.info('同步任务已启动')
+      // 开始轮询进度
+      syncPollRef.current = setInterval(pollSyncStatus, 2000)
+      pollSyncStatus()
+    } catch {
+      message.error('启动同步失败')
+    }
+  }
+
+  const pollSyncStatus = async () => {
+    try {
+      const res = await axios.get('/api/data/sync_qlib/status')
+      setSyncStatus(res.data)
+      if (res.data.status === 'done' || res.data.status === 'error') {
+        if (syncPollRef.current) clearInterval(syncPollRef.current)
+        syncPollRef.current = null
+        if (res.data.status === 'done') message.success(res.data.message)
+        else message.error(res.data.message)
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 页面加载时检查是否有正在运行的同步
+  useEffect(() => {
+    pollSyncStatus()
+    return () => { if (syncPollRef.current) clearInterval(syncPollRef.current) }
+  }, [])
+
   return (
     <div>
       <h2>数据管理</h2>
 
       <Card title="数据源" style={{ marginBottom: 16 }}>
-        <Space>
+        <Space wrap>
           <span>当前数据源：</span>
           <Select
             value={activeSource}
@@ -73,7 +115,28 @@ export default function DataManager() {
             options={sources.map(s => ({ value: s.id, label: `${s.name} ${s.active ? '(当前)' : ''}` }))}
           />
           <Button icon={<SyncOutlined />} onClick={fetchSources}>刷新</Button>
+          <Button
+            type="primary"
+            icon={<CloudSyncOutlined spin={syncStatus?.status === 'running'} />}
+            onClick={startQlibSync}
+            loading={syncStatus?.status === 'running'}
+          >
+            同步到 Qlib
+          </Button>
         </Space>
+        {syncStatus && syncStatus.status !== 'idle' && (
+          <div style={{ marginTop: 12 }}>
+            <Progress
+              percent={syncStatus.progress}
+              status={syncStatus.status === 'error' ? 'exception' : syncStatus.status === 'done' ? 'success' : 'active'}
+              size="small"
+            />
+            <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
+              {syncStatus.message}
+              {syncStatus.status === 'running' && ` (${syncStatus.done_stocks}/${syncStatus.total_stocks})`}
+            </div>
+          </div>
+        )}
       </Card>
 
       <Card title={`股票列表 (共 ${total} 只)`}>
@@ -102,7 +165,15 @@ export default function DataManager() {
             },
             { title: '行业', dataIndex: 'industry', key: 'industry' },
           ]}
-          pagination={{ pageSize: 20 }}
+          pagination={{
+            current: pagination.current,
+            pageSize: pagination.pageSize,
+            total: total,
+            showSizeChanger: true,
+            pageSizeOptions: ['10', '20', '50', '100'],
+            showTotal: (t) => `共 ${t} 条`,
+            onChange: (page, size) => setPagination({ current: page, pageSize: size }),
+          }}
           size="small"
         />
       </Card>

@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2400 160" width="2400" height="160">
+  <defs>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="50%" stop-color="#f1f5f9"/>
+      <stop offset="100%" stop-color="#f8fafc"/>
+    </linearGradient>
+    <radialGradient id="glowMain" cx="0.75" cy="0.4" r="0.5">
+      <stop offset="0%" stop-color="#0dc4a8" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#0dc4a8" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="2400" height="160" fill="url(#bgGrad)"/>
+  <rect width="2400" height="160" fill="url(#glowMain)"/>
+
+  <!-- Top / bottom accent borders -->
+  <line x1="0" y1="0" x2="2400" y2="0" stroke="#0dc4a8" stroke-width="1.5" opacity="0.5"/>
+  <line x1="0" y1="159" x2="2400" y2="159" stroke="#0dc4a8" stroke-width="1" opacity="0.2"/>
+
+  <!-- ===== RIGHT: K-Line Chart ===== -->
+  <!-- Subtle grid -->
+  <g stroke="#0dc4a8" stroke-width="0.4" opacity="0.10">
+    <line x1="1000" y1="35" x2="2360" y2="35"/>
+    <line x1="1000" y1="75" x2="2360" y2="75"/>
+    <line x1="1000" y1="115" x2="2360" y2="115"/>
+  </g>
+
+  <!-- Candles -->
+  <g stroke-linecap="butt">
+    <line x1="1040" y1="125" x2="1040" y2="108" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1040" y1="132" x2="1040" y2="100" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1100" y1="120" x2="1100" y2="98" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1100" y1="128" x2="1100" y2="90" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1160" y1="112" x2="1160" y2="130" stroke="#f97316" stroke-width="7"/>
+    <line x1="1160" y1="104" x2="1160" y2="138" stroke="#f97316" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1220" y1="118" x2="1220" y2="94" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1220" y1="126" x2="1220" y2="86" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1280" y1="104" x2="1280" y2="90" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1280" y1="112" x2="1280" y2="82" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1340" y1="98" x2="1340" y2="112" stroke="#f97316" stroke-width="7"/>
+    <line x1="1340" y1="90" x2="1340" y2="120" stroke="#f97316" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1400" y1="104" x2="1400" y2="76" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1400" y1="112" x2="1400" y2="68" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1460" y1="84" x2="1460" y2="60" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1460" y1="92" x2="1460" y2="52" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1520" y1="68" x2="1520" y2="86" stroke="#f97316" stroke-width="7"/>
+    <line x1="1520" y1="60" x2="1520" y2="94" stroke="#f97316" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1580" y1="76" x2="1580" y2="56" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1580" y1="84" x2="1580" y2="48" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1640" y1="64" x2="1640" y2="40" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1640" y1="72" x2="1640" y2="32" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1700" y1="48" x2="1700" y2="66" stroke="#f97316" stroke-width="7"/>
+    <line x1="1700" y1="40" x2="1700" y2="74" stroke="#f97316" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1760" y1="56" x2="1760" y2="34" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1760" y1="64" x2="1760" y2="26" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1820" y1="40" x2="1820" y2="22" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1820" y1="48" x2="1820" y2="14" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1880" y1="30" x2="1880" y2="16" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1880" y1="38" x2="1880" y2="8" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+
+    <line x1="1940" y1="22" x2="1940" y2="12" stroke="#0d9488" stroke-width="7"/>
+    <line x1="1940" y1="30" x2="1940" y2="4" stroke="#0d9488" stroke-width="1" opacity="0.5"/>
+  </g>
+
+  <!-- MA line -->
+  <path d="M 1040,118 Q 1070,112 1100,106 Q 1130,98 1160,118 Q 1190,130 1220,104 Q 1250,94 1280,96 Q 1310,100 1340,102 Q 1370,96 1400,88 Q 1430,80 1460,70 Q 1490,60 1520,74 Q 1550,88 1580,64 Q 1610,52 1640,50 Q 1670,48 1700,56 Q 1730,62 1760,44 Q 1790,30 1820,30 Q 1850,32 1880,22 Q 1910,16 1940,14" fill="none" stroke="#0d9488" stroke-width="1.5" opacity="0.4"/>
+
+  <!-- Volume bars -->
+  <g opacity="0.06">
+    <rect x="1037" y="138" width="6" height="14" fill="#0d9488"/>
+    <rect x="1097" y="134" width="6" height="18" fill="#0d9488"/>
+    <rect x="1157" y="142" width="6" height="10" fill="#f97316"/>
+    <rect x="1217" y="132" width="6" height="20" fill="#0d9488"/>
+    <rect x="1277" y="138" width="6" height="14" fill="#0d9488"/>
+    <rect x="1337" y="142" width="6" height="10" fill="#f97316"/>
+    <rect x="1397" y="128" width="6" height="24" fill="#0d9488"/>
+    <rect x="1457" y="124" width="6" height="28" fill="#0d9488"/>
+    <rect x="1517" y="138" width="6" height="14" fill="#f97316"/>
+    <rect x="1577" y="124" width="6" height="28" fill="#0d9488"/>
+    <rect x="1637" y="118" width="6" height="34" fill="#0d9488"/>
+    <rect x="1697" y="134" width="6" height="18" fill="#f97316"/>
+    <rect x="1757" y="124" width="6" height="28" fill="#0d9488"/>
+    <rect x="1817" y="128" width="6" height="24" fill="#0d9488"/>
+    <rect x="1877" y="118" width="6" height="34" fill="#0d9488"/>
+    <rect x="1937" y="114" width="6" height="38" fill="#0d9488"/>
+  </g>
+
+  <!-- ===== LEFT SIDE: Brand text (centered vertically) ===== -->
+  <g transform="translate(60, 36)">
+    <!-- Platform label with pill -->
+    <rect x="0" y="0" width="180" height="20" rx="4" fill="#0dc4a8" opacity="0.10"/>
+    <text x="90" y="14" text-anchor="middle" font-family="'SF Mono', 'Fira Code', 'Consolas', monospace" font-size="9" fill="#0d9488" letter-spacing="2">QUANT TRADING PLATFORM</text>
+
+    <!-- Title -->
+    <text x="0" y="52" font-family="'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="32" font-weight="700" fill="#1e293b" letter-spacing="-0.5">
+      SharkyAI QTrader
+    </text>
+
+    <!-- Subtitle -->
+    <text x="0" y="80" font-family="'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="14" fill="#64748b" letter-spacing="0">
+      Event-Driven Backtest Engine
+      <tspan fill="#0d9488" font-weight="600" dx="6">+</tspan>
+      <tspan dx="6">Live Execution</tspan>
+    </text>
+
+    <!-- Description -->
+    <text x="0" y="104" font-family="'SF Pro Display', 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#94a3b8" letter-spacing="0.1">
+      Multi-asset quant research · Strategy backtesting · AI-powered market analysis
+    </text>
+  </g>
+</svg>

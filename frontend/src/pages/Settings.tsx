@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Card, Form, Input, Select, Button, Divider, message, Space, Alert, Descriptions } from 'antd'
+import { Card, Form, Input, Select, Button, message, Alert, Descriptions } from 'antd'
 import axios from 'axios'
 
 export default function Settings() {
@@ -87,13 +87,6 @@ export default function Settings() {
         </Form>
       </Card>
 
-      <Card title="关于">
-        <Space direction="vertical">
-          <span>QTrader - 独立量化交易模块</span>
-          <span>与 Qlib 完全解耦，通过桥接层调用 Qlib 模型/回测能力</span>
-          <span>技术栈: FastAPI + React 18 + Ant Design 5 + AKShare</span>
-        </Space>
-      </Card>
     </div>
   )
 }

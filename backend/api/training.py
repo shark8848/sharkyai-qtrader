@@ -1,6 +1,9 @@
 """Training and backtest API routes."""
 
+from pathlib import Path
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
 
 from qtrader.backend.core.engine.trainer import trainer, TrainConfig
 from qtrader.backend.core.engine.backtest import backtest_engine, BacktestConfig
@@ -24,7 +27,11 @@ async def get_train_config():
         "valid_range": ["2015-01-01", "2016-12-31"],
         "test_range": ["2017-01-01", "2020-08-01"],
         "benchmark": "SH000300",
-        "available_models": ["LGBModel", "XGBModel", "CatBoostModel", "LinearModel"],
+        "available_models": [
+            "LGBModel", "XGBModel", "CatBoostModel", "LinearModel", "DEnsembleModel",
+            "GRU", "LSTM", "ALSTM", "TransformerModel", "TCN",
+            "TabnetModel", "DNNModelPytorch", "GATs", "SFM_Model",
+        ],
         "available_handlers": ["Alpha158", "Alpha360"],
         "available_markets": ["csi300", "csi500", "csi800", "csi100"],
     }
@@ -57,6 +64,15 @@ async def get_training_status(job_id: str):
 async def list_training_jobs():
     """List all training jobs."""
     return [j.to_dict() for j in trainer.list_jobs()]
+
+
+@router.delete("/train/jobs/{job_id}")
+async def delete_training_job(job_id: str):
+    """Delete a training job."""
+    deleted = trainer.delete_job(job_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"message": f"Job {job_id} deleted"}
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +115,23 @@ async def delete_model(model_id: str):
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     store.delete_model(model_id)
     return {"message": f"Model {model_id} deleted"}
+
+
+@router.get("/models/{model_id}/download")
+async def download_model(model_id: str):
+    """Download model file."""
+    store = get_model_store()
+    meta = store.get_meta(model_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    model_file = Path(meta["model_file"])
+    if not model_file.exists():
+        raise HTTPException(status_code=404, detail="Model file not found on disk")
+    return FileResponse(
+        path=str(model_file),
+        filename=f"{model_id}_{meta['model_class']}.pkl",
+        media_type="application/octet-stream",
+    )
 
 
 # ---------------------------------------------------------------------------

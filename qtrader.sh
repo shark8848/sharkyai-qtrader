@@ -97,10 +97,13 @@ start_backend() {
 
     export MLFLOW_ALLOW_FILE_STORE=true
 
+    # 从项目根目录启动，确保 qtrader 包可被正确导入
+    cd "$PROJECT_DIR/.."
     nohup "$python" -m uvicorn qtrader.backend.main:app \
         --host "$BACKEND_HOST" \
         --port "$BACKEND_PORT" \
         >> "$BACKEND_LOG" 2>&1 &
+    cd "$PROJECT_DIR"
 
     echo $! > "$BACKEND_PID"
 

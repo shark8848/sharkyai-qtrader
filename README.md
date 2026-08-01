@@ -12,12 +12,24 @@
 
 - **多数据源**：AKShare / Qlib 统一抽象，运行时热切换，SQLite 增量缓存
 - **AI 训练引擎**：桥接 Qlib 生态，支持 LightGBM / XGBoost / CatBoost / Linear 四种模型
-- **回测引擎**：TopkDropout 策略 + 评估器（Sharpe、最大回撤、Calmar、信息比率）+ Plotly 图表
+- **模型版本管理**：训练模型自动持久化，版本号递增，支持按任务查询与下载
+- **回测引擎**：TopkDropout 策略 + 评估器（Sharpe、最大回撤、Calmar、信息比率）+ Plotly 图表 + 多策略对比
 - **交易模块**：SimBroker 内存撮合（T+1）+ 东方财富 jvQuant API 接口
 - **风控体系**：单笔限额 / 日交易次数 / 仓位比例 / 涨停过滤 / 日亏损熔断
-- **策略引擎**：信号 → 风控过滤 → 下单执行 + 定时调仓
+- **策略引擎**：信号 → 风控过滤 → 下单执行 + 定时调仓 + 运行日志
+- **任务持久化**：训练/回测任务支持 SQLite（默认）或 PostgreSQL 后端
 - **实时进度**：训练进度百分比 + 日志时间线 + WebSocket 推送
-- **服务管理**：`qtrader.sh` 一键启停脚本
+- **服务管理**：`qtrader.sh` 一键启停脚本（start / stop / restart / status / logs）
+
+### 技术栈
+
+| 层 | 技术 |
+|---|---|
+| 后端 | FastAPI + Pydantic v2 + Uvicorn |
+| 前端 | React 18 + TypeScript + Vite 6 + Ant Design 5 + Zustand |
+| 可视化 | Plotly + Lightweight Charts |
+| AI/ML | Qlib + LightGBM + XGBoost + CatBoost |
+| 存储 | SQLite / PostgreSQL（任务）+ 文件系统（模型） |
 
 ### 快速开始
 
@@ -46,25 +58,69 @@ cd frontend && npm install && cd ..
 
 自定义端口：`QTRADER_PORT=9000 QTRADER_FE_PORT=3000 ./qtrader.sh start`
 
+### 项目结构
+
+```
+qtrader/
+├── backend/
+│   ├── api/            # FastAPI 路由 (data / training / trading / ws)
+│   ├── core/
+│   │   ├── data/       # 多数据源抽象 + 缓存
+│   │   ├── engine/     # 训练器 / 回测 / 评估 / 模型存储 / 任务存储
+│   │   └── trading/    # 券商 / 风控 / 订单 / 策略
+│   ├── config.py       # 全局配置 (环境变量 QTRADER_* / .env)
+│   └── main.py         # 应用入口
+├── frontend/
+│   └── src/pages/      # Dashboard / DataManager / BacktestPanel / TradingPanel / Settings
+├── logs/               # 运行日志
+├── qtrader.sh          # 服务管理脚本
+└── requirements.txt    # Python 依赖
+```
+
 ### API 概览
 
-**数据管理**
-- `GET /api/data/sources` — 获取可用数据源
-- `POST /api/data/switch` — 切换数据源
-- `GET /api/data/stocks` — 获取股票列表
-- `GET /api/data/kline` — 获取 K 线数据
+**数据管理** `/api/data`
+- `GET /sources` — 获取可用数据源
+- `POST /switch` — 切换数据源
+- `GET /stocks` — 获取股票列表
+- `GET /kline` — 获取 K 线数据
 
-**训练回测**
-- `POST /api/train/start` — 启动训练任务
-- `GET /api/train/status/{job_id}` — 查询训练进度（含实时日志）
-- `POST /api/backtest/run` — 执行回测
-- `GET /api/backtest/result/{job_id}` — 获取回测结果 + 图表
+**训练** `/api/train`
+- `GET /config` — 获取默认训练配置（可用模型/因子/市场）
+- `POST /start` — 启动训练任务（异步）
+- `GET /status/{job_id}` — 查询训练进度（含实时日志）
+- `GET /jobs` — 列出所有训练任务
+- `DELETE /jobs/{job_id}` — 删除训练任务
 
-**交易**
-- `POST /api/trade/connect` — 连接券商
-- `POST /api/trade/order` — 下单（含风控检查）
-- `GET /api/trade/positions` — 查询持仓
-- `PUT /api/trade/risk/config` — 配置风控参数
+**模型管理** `/api/models`
+- `GET /` — 列出所有已保存模型（含版本号）
+- `GET /{model_id}` — 获取模型元数据
+- `GET /by-job/{job_id}` — 按训练任务查找模型
+- `GET /{model_id}/download` — 下载模型文件
+- `DELETE /{model_id}` — 删除模型
+
+**回测** `/api/backtest`
+- `POST /run` — 执行回测（异步）
+- `GET /result/{job_id}` — 获取回测结果 + 图表
+- `GET /jobs` — 列出所有回测任务
+- `POST /compare` — 多策略对比
+
+**交易** `/api/trade`
+- `POST /connect` — 连接券商
+- `GET /status` — 券商/策略状态
+- `GET /balance` — 查询资金
+- `GET /positions` — 查询持仓
+- `POST /order` — 下单（含风控检查）
+- `GET /orders` — 查询今日委托
+- `POST /cancel/{order_id}` — 撤单
+- `POST /strategy/start` — 启动自动策略
+- `POST /strategy/stop` — 停止自动策略
+- `GET /strategy/logs` — 策略运行日志
+
+**风控** `/api/trade/risk`
+- `GET /config` — 获取风控配置
+- `PUT /config` — 更新风控配置
+- `GET /stats` — 风控日统计
 
 **WebSocket**：`ws://localhost:8000/ws` — 实时推送（quotes / orders / training / position 频道）
 
@@ -78,6 +134,19 @@ cd frontend && npm install && cd ..
 | `filter_limit_up` | true | 涨停股过滤 |
 | `circuit_breaker_loss` | -0.05 | 日亏损熔断阈值 |
 
+### 环境变量
+
+所有配置项支持 `QTRADER_` 前缀环境变量或 `.env` 文件：
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `QTRADER_PORT` | 8000 | 后端端口 |
+| `QTRADER_FE_PORT` | 5173 | 前端端口 |
+| `QTRADER_HOST` | 0.0.0.0 | 后端监听地址 |
+| `QTRADER_JOB_STORE_BACKEND` | sqlite | 任务存储后端 (sqlite / postgresql) |
+| `QTRADER_JOB_STORE_PG_DSN` | — | PostgreSQL 连接串 |
+| `QTRADER_BROKER_TYPE` | sim | 券商类型 (sim / eastmoney) |
+
 ---
 
 ## English
@@ -88,12 +157,24 @@ A full-stack quantitative trading platform built on the [Qlib](https://github.co
 
 - **Multi-Source Data**: Unified AKShare / Qlib abstraction with runtime hot-switching and SQLite incremental caching
 - **AI Training Engine**: Bridges the Qlib ecosystem — supports LightGBM, XGBoost, CatBoost, and Linear models
-- **Backtesting Engine**: TopkDropout strategy + evaluator (Sharpe, max drawdown, Calmar, IR) with Plotly charts
+- **Model Versioning**: Trained models auto-persisted with incremental versioning, queryable by job and downloadable
+- **Backtesting Engine**: TopkDropout strategy + evaluator (Sharpe, max drawdown, Calmar, IR) with Plotly charts + multi-strategy comparison
 - **Trading Module**: SimBroker in-memory matching (T+1) + EastMoney jvQuant API integration
 - **Risk Control**: Per-order limit / daily trade cap / position ratio / limit-up filter / daily loss circuit breaker
-- **Strategy Engine**: Signal → risk filter → order execution with scheduled rebalancing
+- **Strategy Engine**: Signal → risk filter → order execution with scheduled rebalancing + runtime logs
+- **Job Persistence**: Training/backtest jobs stored in SQLite (default) or PostgreSQL
 - **Real-Time Progress**: Training progress percentage + log timeline + WebSocket push
-- **Service Management**: One-command `qtrader.sh` start/stop script
+- **Service Management**: One-command `qtrader.sh` script (start / stop / restart / status / logs)
+
+### Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Backend | FastAPI + Pydantic v2 + Uvicorn |
+| Frontend | React 18 + TypeScript + Vite 6 + Ant Design 5 + Zustand |
+| Visualization | Plotly + Lightweight Charts |
+| AI/ML | Qlib + LightGBM + XGBoost + CatBoost |
+| Storage | SQLite / PostgreSQL (jobs) + File system (models) |
 
 ### Quick Start
 
@@ -118,25 +199,69 @@ cd frontend && npm install && cd ..
 
 Custom ports: `QTRADER_PORT=9000 QTRADER_FE_PORT=3000 ./qtrader.sh start`
 
+### Project Structure
+
+```
+qtrader/
+├── backend/
+│   ├── api/            # FastAPI routes (data / training / trading / ws)
+│   ├── core/
+│   │   ├── data/       # Multi-source abstraction + caching
+│   │   ├── engine/     # Trainer / backtest / evaluator / model store / job store
+│   │   └── trading/    # Broker / risk / order / strategy
+│   ├── config.py       # Global config (env QTRADER_* / .env)
+│   └── main.py         # App entry point
+├── frontend/
+│   └── src/pages/      # Dashboard / DataManager / BacktestPanel / TradingPanel / Settings
+├── logs/               # Runtime logs
+├── qtrader.sh          # Service management script
+└── requirements.txt    # Python dependencies
+```
+
 ### API Overview
 
-**Data Management**
-- `GET /api/data/sources` — List available data sources
-- `POST /api/data/switch` — Switch active data source
-- `GET /api/data/stocks` — Get stock list
-- `GET /api/data/kline` — Get K-line data
+**Data Management** `/api/data`
+- `GET /sources` — List available data sources
+- `POST /switch` — Switch active data source
+- `GET /stocks` — Get stock list
+- `GET /kline` — Get K-line data
 
-**Training & Backtesting**
-- `POST /api/train/start` — Start a training job
-- `GET /api/train/status/{job_id}` — Query training progress (with real-time logs)
-- `POST /api/backtest/run` — Execute backtest
-- `GET /api/backtest/result/{job_id}` — Get backtest results + charts
+**Training** `/api/train`
+- `GET /config` — Get default training config (available models/handlers/markets)
+- `POST /start` — Start a training job (async)
+- `GET /status/{job_id}` — Query training progress (with real-time logs)
+- `GET /jobs` — List all training jobs
+- `DELETE /jobs/{job_id}` — Delete a training job
 
-**Trading**
-- `POST /api/trade/connect` — Connect to broker
-- `POST /api/trade/order` — Place order (with risk check)
-- `GET /api/trade/positions` — Query positions
-- `PUT /api/trade/risk/config` — Configure risk parameters
+**Model Management** `/api/models`
+- `GET /` — List all saved models (with version info)
+- `GET /{model_id}` — Get model metadata
+- `GET /by-job/{job_id}` — Find model by training job
+- `GET /{model_id}/download` — Download model file
+- `DELETE /{model_id}` — Delete model
+
+**Backtesting** `/api/backtest`
+- `POST /run` — Execute backtest (async)
+- `GET /result/{job_id}` — Get backtest results + charts
+- `GET /jobs` — List all backtest jobs
+- `POST /compare` — Compare multiple strategies
+
+**Trading** `/api/trade`
+- `POST /connect` — Connect to broker
+- `GET /status` — Broker/strategy status
+- `GET /balance` — Query balance
+- `GET /positions` — Query positions
+- `POST /order` — Place order (with risk check)
+- `GET /orders` — Query today's orders
+- `POST /cancel/{order_id}` — Cancel order
+- `POST /strategy/start` — Start auto strategy
+- `POST /strategy/stop` — Stop auto strategy
+- `GET /strategy/logs` — Strategy runtime logs
+
+**Risk Control** `/api/trade/risk`
+- `GET /config` — Get risk config
+- `PUT /config` — Update risk config
+- `GET /stats` — Daily risk statistics
 
 **WebSocket**: `ws://localhost:8000/ws` — Real-time push (quotes / orders / training / position channels)
 
@@ -149,6 +274,19 @@ Custom ports: `QTRADER_PORT=9000 QTRADER_FE_PORT=3000 ./qtrader.sh start`
 | `max_position_pct` | 0.2 | Max single-stock position ratio |
 | `filter_limit_up` | true | Filter limit-up stocks |
 | `circuit_breaker_loss` | -0.05 | Daily loss circuit breaker threshold |
+
+### Environment Variables
+
+All settings support `QTRADER_` prefixed env vars or a `.env` file:
+
+| Variable | Default | Description |
+|---|---|---|
+| `QTRADER_PORT` | 8000 | Backend port |
+| `QTRADER_FE_PORT` | 5173 | Frontend port |
+| `QTRADER_HOST` | 0.0.0.0 | Backend listen address |
+| `QTRADER_JOB_STORE_BACKEND` | sqlite | Job store backend (sqlite / postgresql) |
+| `QTRADER_JOB_STORE_PG_DSN` | — | PostgreSQL connection string |
+| `QTRADER_BROKER_TYPE` | sim | Broker type (sim / eastmoney) |
 
 ---
 

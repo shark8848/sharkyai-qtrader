@@ -5,6 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from qtrader.backend.core.data.manager import data_manager
+from qtrader.backend.core.data.qlib_sync import start_sync, get_sync_status
 
 router = APIRouter()
 
@@ -31,7 +32,7 @@ async def get_stock_list(keyword: Optional[str] = Query(None, description="Searc
     if keyword and not df.empty:
         mask = df["symbol"].str.contains(keyword, na=False) | df["name"].str.contains(keyword, na=False)
         df = df[mask]
-    records = df.head(200).to_dict(orient="records")
+    records = df.to_dict(orient="records")
     return {"total": len(df), "data": records}
 
 
@@ -76,3 +77,16 @@ async def sync_data(
     """Force re-sync kline data from the active source (bypass cache)."""
     result = await data_manager.sync_kline(symbol, start_date, end_date)
     return result
+
+
+@router.post("/sync_qlib")
+async def sync_qlib(market: str = Query("all", description="Stock pool to sync")):
+    """Start background task: sync AKShare data to Qlib .bin format."""
+    result = start_sync(market)
+    return result
+
+
+@router.get("/sync_qlib/status")
+async def sync_qlib_status():
+    """Get the current sync task progress."""
+    return get_sync_status()

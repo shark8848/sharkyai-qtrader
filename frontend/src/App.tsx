@@ -49,7 +49,7 @@ function AppLayout() {
       </Sider>
       <Layout>
         <Header style={{ padding: '0 24px', background: colorBgContainer, display: 'flex', alignItems: 'center' }}>
-          <h3 style={{ margin: 0 }}>AI 量化交易平台</h3>
+          <h3 style={{ margin: 0, fontWeight: 600 }}>QTrader · AI 量化交易平台</h3>
         </Header>
         <Content style={{ margin: '16px' }}>
           <div style={{
