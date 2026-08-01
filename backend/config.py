@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     # Database
     db_url: str = "sqlite+aiosqlite:///" + str(Path.home() / ".qtrader" / "qtrader.db")
 
+    # Job store (training job persistence)
+    job_store_backend: str = "sqlite"  # sqlite | postgresql
+    job_store_db_path: str = str(Path.home() / ".qtrader" / "jobs.db")
+    job_store_pg_dsn: str = ""  # postgresql://user:pass@host:5432/dbname
+
     # Trading
     broker_type: str = "sim"  # sim | eastmoney
     eastmoney_gateway: str = ""

@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 配置模型
 # ---------------------------------------------------------------------------
-
 class JobStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
@@ -62,6 +61,7 @@ class TrainJob:
         self.current_step: str = ""     # 当前步骤描述
         self.logs: list[dict] = []      # [{time, step, level}]
         self._lock = threading.Lock()
+        self._on_update = None          # 进度更新回调 (用于持久化)
 
     def update_progress(self, progress: int, step: str, level: str = "info"):
         """线程安全地更新进度"""
@@ -74,6 +74,12 @@ class TrainJob:
                 "level": level,
             }
             self.logs.append(entry)
+        # 触发持久化回调
+        if self._on_update:
+            try:
+                self._on_update(self)
+            except Exception:
+                pass
 
     def to_dict(self) -> dict:
         with self._lock:
@@ -155,12 +161,91 @@ HANDLER_REGISTRY: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 class Trainer:
-    """异步训练管理器"""
+    """异步训练管理器（支持持久化）"""
 
-    def __init__(self, data_dir: str = None):
+    def __init__(self, data_dir: str = None, job_store=None):
         self._jobs: dict[str, TrainJob] = {}
         self._data_dir = data_dir or str(Path.home() / ".qlib" / "qlib_data" / "cn_data")
         self._qlib_initialized = False
+        # 持久化存储
+        self._store = job_store
+        if self._store is None:
+            self._store = self._create_default_store()
+        self._restore_jobs()
+
+    @staticmethod
+    def _create_default_store():
+        """根据配置创建默认 JobStore"""
+        try:
+            from qtrader.backend.config import settings
+            from qtrader.backend.core.engine.job_store import create_job_store
+            if settings.job_store_backend in ("postgresql", "postgres", "pg"):
+                return create_job_store("postgresql", dsn=settings.job_store_pg_dsn)
+            else:
+                return create_job_store("sqlite", db_path=settings.job_store_db_path)
+        except Exception as e:
+            logger.warning(f"Failed to create job store, using in-memory only: {e}")
+            return None
+
+    def _restore_jobs(self):
+        """从存储恢复历史任务"""
+        if self._store is None:
+            return
+        try:
+            rows = self._store.load_all_jobs()
+            for row in rows:
+                job = self._row_to_job(row)
+                if job:
+                    job._on_update = lambda j: self._persist_job(j)
+                    # running 状态的任务重启后标记为 failed
+                    if job.status == JobStatus.RUNNING:
+                        job.status = JobStatus.FAILED
+                        job.error = "服务重启，任务中断"
+                        job.finished_at = datetime.now().isoformat(timespec="seconds")
+                    self._jobs[job.job_id] = job
+            logger.info(f"Restored {len(self._jobs)} jobs from store")
+        except Exception as e:
+            logger.warning(f"Failed to restore jobs: {e}")
+
+    def _row_to_job(self, row: dict) -> Optional[TrainJob]:
+        """从存储行恢复 TrainJob"""
+        try:
+            config_data = row.get("config", {})
+            if isinstance(config_data, str):
+                import json
+                config_data = json.loads(config_data)
+            config = TrainConfig(**config_data)
+            job = TrainJob(job_id=row["job_id"], config=config)
+            job.status = JobStatus(row.get("status", "pending"))
+            job.created_at = row.get("created_at", "")
+            job.finished_at = row.get("finished_at")
+            job.error = row.get("error")
+            job.model_path = row.get("model_path")
+            metrics = row.get("metrics")
+            if isinstance(metrics, str):
+                import json
+                metrics = json.loads(metrics)
+            job.metrics = metrics
+            job.progress = row.get("progress", 0)
+            job.current_step = row.get("current_step", "")
+            logs = row.get("logs", [])
+            if isinstance(logs, str):
+                import json
+                logs = json.loads(logs)
+            job.logs = logs if isinstance(logs, list) else []
+            return job
+        except Exception as e:
+            logger.warning(f"Failed to restore job {row.get('job_id')}: {e}")
+            return None
+
+    def _persist_job(self, job: TrainJob):
+        """持久化任务状态到存储"""
+        if self._store is None:
+            return
+        try:
+            self._store.save_job(job.to_dict())
+        except Exception as e:
+            logger.warning(f"Failed to persist job {job.job_id}: {e}")
 
     def _ensure_qlib(self):
         """延迟初始化 qlib"""
@@ -176,7 +261,9 @@ class Trainer:
         """提交训练任务"""
         job_id = f"train_{uuid.uuid4().hex[:12]}"
         job = TrainJob(job_id=job_id, config=config)
+        job._on_update = lambda j: self._persist_job(j)
         self._jobs[job_id] = job
+        self._persist_job(job)
         return job
 
     async def run(self, job_id: str):
@@ -187,6 +274,7 @@ class Trainer:
 
         job.status = JobStatus.RUNNING
         job.update_progress(0, "任务已提交，等待执行...")
+        self._persist_job(job)
 
         loop = asyncio.get_event_loop()
         try:
@@ -202,6 +290,7 @@ class Trainer:
             job.update_progress(job.progress, f"训练失败: {e}", level="error")
         finally:
             job.finished_at = datetime.now().isoformat(timespec="seconds")
+            self._persist_job(job)
 
     def _run_training(self, job: TrainJob) -> dict:
         """同步训练逻辑（在线程中执行）"""
@@ -257,6 +346,14 @@ class Trainer:
         dataset = init_instance_by_config(dataset_config)
         job.update_progress(35, f"数据集加载完成 (训练集 {config.train_range[0]}~{config.train_range[1]})")
 
+        # 清理 NaN 标签（CatBoost 等模型不允许目标列含 NaN）
+        job.update_progress(37, "正在清洗数据（移除 NaN 标签）...")
+        nan_count = self._clean_dataset_nan(dataset)
+        if nan_count > 0:
+            job.update_progress(38, f"已移除 {nan_count} 条 NaN 标签数据")
+        else:
+            job.update_progress(38, "数据清洗完成，无 NaN 标签")
+
         # 训练
         job.update_progress(40, "开始训练模型 ...")
         with R.start(experiment_name=f"qtrader_{job.job_id}"):
@@ -277,6 +374,45 @@ class Trainer:
 
         job.update_progress(95, "保存结果 ...")
         return {"metrics": metrics, "model_path": None}
+
+    def _clean_dataset_nan(self, dataset) -> int:
+        """清洗数据集中的 NaN 标签行"""
+        import pandas as pd
+        total_dropped = 0
+        try:
+            # qlib DatasetH 的 handler 存储原始 DataFrame
+            handler = dataset.handler
+            if handler is not None and hasattr(handler, 'df'):
+                df = handler.df
+                # label 列通常名为 'LABEL' 或在 columns 中含 'label'
+                label_cols = [c for c in df.columns if 'LABEL' in str(c).upper() or 'label' in str(c).lower()]
+                if not label_cols:
+                    # 尝试用最后一列作为 label
+                    label_cols = [df.columns[-1]]
+                for col in label_cols:
+                    mask = df[col].isna()
+                    n = mask.sum()
+                    if n > 0:
+                        handler.df = df[~mask]
+                        total_dropped += int(n)
+                        logger.info(f"Dropped {n} NaN rows from label column '{col}'")
+            # 清理各 segment 的缓存数据
+            if hasattr(dataset, 'segments') and isinstance(dataset.segments, dict):
+                for seg_name, seg_data in dataset.segments.items():
+                    if hasattr(seg_data, 'data') and isinstance(seg_data.data, pd.DataFrame):
+                        label_cols = [c for c in seg_data.data.columns if 'LABEL' in str(c).upper() or 'label' in str(c).lower()]
+                        if not label_cols and len(seg_data.data.columns) > 0:
+                            label_cols = [seg_data.data.columns[-1]]
+                        for col in label_cols:
+                            mask = seg_data.data[col].isna()
+                            n = mask.sum()
+                            if n > 0:
+                                seg_data.data = seg_data.data[~mask].reset_index(drop=True)
+                                total_dropped += int(n)
+                                logger.info(f"Dropped {n} NaN rows from segment '{seg_name}'")
+        except Exception as e:
+            logger.warning(f"NaN cleaning failed (non-critical): {e}")
+        return total_dropped
 
     def _extract_metrics(self, recorder) -> dict:
         """从 recorder 提取分析数据"""
