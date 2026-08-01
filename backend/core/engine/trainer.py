@@ -346,13 +346,22 @@ class Trainer:
         dataset = init_instance_by_config(dataset_config)
         job.update_progress(35, f"数据集加载完成 (训练集 {config.train_range[0]}~{config.train_range[1]})")
 
-        # 清理 NaN 标签（CatBoost 等模型不允许目标列含 NaN）
-        job.update_progress(37, "正在清洗数据（移除 NaN 标签）...")
-        nan_count = self._clean_dataset_nan(dataset)
-        if nan_count > 0:
-            job.update_progress(38, f"已移除 {nan_count} 条 NaN 标签数据")
+        # 清理 NaN 标签（仅 CatBoost 需要，其 RMSE 不允许目标列含 NaN）
+        if config.model_class == "CatBoostModel":
+            job.update_progress(37, "正在清洗数据（移除 NaN 标签）...")
+            nan_count = self._clean_dataset_nan(dataset)
+            if nan_count > 0:
+                job.update_progress(38, f"已移除 {nan_count} 条 NaN 标签数据")
+            else:
+                job.update_progress(38, "数据清洗完成，无 NaN 标签")
+        elif config.model_class == "LinearModel":
+            # LinearModel 内部 dropna() 会删除任何含 NaN 的行，
+            # Alpha158/360 的 CSZScoreNorm 处理器引入大量 NaN，需拦截 prepare()
+            job.update_progress(37, "正在预处理 NaN（LinearModel 要求）...")
+            self._fill_feature_nan(dataset)
+            job.update_progress(38, "已启用自动 NaN 填充（拦截 prepare 调用）")
         else:
-            job.update_progress(38, "数据清洗完成，无 NaN 标签")
+            job.update_progress(38, "跳过 NaN 清洗（树模型内置处理）")
 
         # 训练
         job.update_progress(40, "开始训练模型 ...")
@@ -376,42 +385,23 @@ class Trainer:
         return {"metrics": metrics, "model_path": None}
 
     def _clean_dataset_nan(self, dataset) -> int:
-        """清洗数据集中的 NaN 标签行"""
-        import pandas as pd
+        """清洗数据集中的 NaN 标签行（仅修改 handler 内部数据）"""
         total_dropped = 0
         try:
-            # qlib DatasetH 的 handler 存储原始 DataFrame
-            handler = dataset.handler
-            if handler is not None and hasattr(handler, 'df'):
-                df = handler.df
-                # label 列通常名为 'LABEL' 或在 columns 中含 'label'
-                label_cols = [c for c in df.columns if 'LABEL' in str(c).upper() or 'label' in str(c).lower()]
-                if not label_cols:
-                    # 尝试用最后一列作为 label
-                    label_cols = [df.columns[-1]]
-                for col in label_cols:
-                    mask = df[col].isna()
-                    n = mask.sum()
-                    if n > 0:
-                        handler.df = df[~mask]
-                        total_dropped += int(n)
-                        logger.info(f"Dropped {n} NaN rows from label column '{col}'")
-            # 清理各 segment 的缓存数据
-            if hasattr(dataset, 'segments') and isinstance(dataset.segments, dict):
-                for seg_name, seg_data in dataset.segments.items():
-                    if hasattr(seg_data, 'data') and isinstance(seg_data.data, pd.DataFrame):
-                        label_cols = [c for c in seg_data.data.columns if 'LABEL' in str(c).upper() or 'label' in str(c).lower()]
-                        if not label_cols and len(seg_data.data.columns) > 0:
-                            label_cols = [seg_data.data.columns[-1]]
-                        for col in label_cols:
-                            mask = seg_data.data[col].isna()
-                            n = mask.sum()
-                            if n > 0:
-                                seg_data.data = seg_data.data[~mask].reset_index(drop=True)
-                                total_dropped += int(n)
-                                logger.info(f"Dropped {n} NaN rows from segment '{seg_name}'")
+            df = self._get_handler_df(dataset)
+            if df is None:
+                return 0
+            label_cols = [c for c in df.columns if 'LABEL' in str(c).upper()]
+            if not label_cols:
+                return 0
+            nan_mask = df[label_cols].isna().any(axis=1)
+            total_dropped = int(nan_mask.sum())
+            if total_dropped > 0:
+                self._set_handler_df(dataset, df[~nan_mask])
+                logger.info(f"Dropped {total_dropped} NaN rows from label")
         except Exception as e:
-            logger.warning(f"NaN cleaning failed (non-critical): {e}")
+            logger.warning(f"NaN cleaning failed: {e}")
+            total_dropped = 0
         return total_dropped
 
     def _extract_metrics(self, recorder) -> dict:
@@ -423,6 +413,53 @@ class Trainer:
         except Exception:
             pass
         return {"status": "completed"}
+
+    def _fill_feature_nan(self, dataset) -> int:
+        """拦截 dataset.prepare()，在返回数据前填充 NaN（LinearModel 需要）"""
+        original_prepare = dataset.prepare
+        fill_count = [0]
+
+        def patched_prepare(*args, **kwargs):
+            result = original_prepare(*args, **kwargs)
+            import pandas as pd
+            if isinstance(result, pd.DataFrame) and not result.empty:
+                nan_count = int(result.isna().sum().sum())
+                if nan_count > 0:
+                    fill_count[0] += nan_count
+                    result = result.ffill().bfill().fillna(0)
+            return result
+
+        dataset.prepare = patched_prepare
+        logger.info("Patched dataset.prepare() to auto-fill NaN for LinearModel")
+        return -1  # -1 表示已启用自动填充模式
+
+    @staticmethod
+    def _get_handler_df(dataset):
+        """获取 handler 的内部 DataFrame（兼容 .df 和 ._data）"""
+        handler = getattr(dataset, 'handler', None)
+        if handler is None:
+            return None
+        # Alpha158/Alpha360 存在 _data 属性
+        if hasattr(handler, '_data'):
+            import pandas as pd
+            d = handler._data
+            if isinstance(d, pd.DataFrame) and not d.empty:
+                return d
+        # 其他 handler 可能用 .df
+        if hasattr(handler, 'df'):
+            return handler.df
+        return None
+
+    @staticmethod
+    def _set_handler_df(dataset, new_df):
+        """设置 handler 的内部 DataFrame"""
+        handler = getattr(dataset, 'handler', None)
+        if handler is None:
+            return
+        if hasattr(handler, '_data'):
+            handler._data = new_df
+        elif hasattr(handler, 'df'):
+            handler.df = new_df
 
     def get_job(self, job_id: str) -> Optional[TrainJob]:
         return self._jobs.get(job_id)
