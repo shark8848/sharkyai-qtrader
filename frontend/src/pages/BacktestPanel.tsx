@@ -206,10 +206,18 @@ export default function BacktestPanel() {
           <Card title="回测结果">
             {activeJob?.status === 'success' && activeJob.metrics ? (
               <Row gutter={16}>
-                <Col span={12}><Statistic title="年化收益" value={12.72} suffix="%" /></Col>
-                <Col span={12}><Statistic title="Sharpe" value={1.45} /></Col>
-                <Col span={12}><Statistic title="最大回撤" value={-6.62} suffix="%" /></Col>
-                <Col span={12}><Statistic title="信息比率" value={1.45} /></Col>
+                <Col span={12}><Statistic title="年化收益" value={activeJob.metrics.annualized_return ?? '-'} suffix="%" /></Col>
+                <Col span={12}><Statistic title="Sharpe" value={activeJob.metrics.sharpe ?? '-'} /></Col>
+                <Col span={12}><Statistic title="最大回撤" value={activeJob.metrics.max_drawdown ?? '-'} suffix="%" /></Col>
+                <Col span={12}><Statistic title="信息比率" value={activeJob.metrics.information_ratio ?? '-'} /></Col>
+                {activeJob.metrics.ic != null && (
+                  <>
+                    <Col span={12}><Statistic title="IC" value={activeJob.metrics.ic} /></Col>
+                    <Col span={12}><Statistic title="ICIR" value={activeJob.metrics.icir} /></Col>
+                    <Col span={12}><Statistic title="Rank IC" value={activeJob.metrics.rank_ic} /></Col>
+                    <Col span={12}><Statistic title="Rank ICIR" value={activeJob.metrics.rank_icir} /></Col>
+                  </>
+                )}
               </Row>
             ) : (
               <div style={{ textAlign: 'center', padding: 40, color: '#999' }}>

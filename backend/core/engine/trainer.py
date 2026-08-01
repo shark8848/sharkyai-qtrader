@@ -90,6 +90,7 @@ class TrainJob:
                 "finished_at": self.finished_at,
                 "error": self.error,
                 "metrics": self.metrics,
+                "model_path": self.model_path,
                 "progress": self.progress,
                 "current_step": self.current_step,
                 "logs": list(self.logs),
@@ -367,22 +368,85 @@ class Trainer:
         job.update_progress(40, "开始训练模型 ...")
         with R.start(experiment_name=f"qtrader_{job.job_id}"):
             model.fit(dataset)
-            job.update_progress(60, "模型训练完成，生成预测信号 ...")
+            job.update_progress(55, "模型训练完成，生成预测信号 ...")
 
             recorder = R.get_recorder()
             sr = SignalRecord(model, dataset, recorder)
             sr.generate()
-            job.update_progress(75, "预测信号生成完成")
+            job.update_progress(65, "预测信号生成完成")
 
             sar = SigAnaRecord(recorder)
             sar.generate()
-            job.update_progress(90, "信号分析完成")
+            job.update_progress(75, "信号分析完成")
 
-        # 尝试提取分析指标
+            # 组合回测分析
+            job.update_progress(76, "正在执行组合回测分析 ...")
+            port_analysis_config = {
+                "executor": {
+                    "class": "SimulatorExecutor",
+                    "module_path": "qlib.backtest.executor",
+                    "kwargs": {
+                        "time_per_step": "day",
+                        "generate_portfolio_metrics": True,
+                    },
+                },
+                "strategy": {
+                    "class": "TopkDropoutStrategy",
+                    "module_path": "qlib.contrib.strategy.signal_strategy",
+                    "kwargs": {
+                        "signal": (model, dataset),
+                        "topk": 50,
+                        "n_drop": 5,
+                    },
+                },
+                "backtest": {
+                    "start_time": config.test_range[0],
+                    "end_time": config.test_range[1],
+                    "account": 100000000,
+                    "benchmark": "SH000300",
+                    "exchange_kwargs": {
+                        "freq": "day",
+                        "limit_threshold": 0.095,
+                        "deal_price": "close",
+                        "open_cost": 0.0005,
+                        "close_cost": 0.0015,
+                        "min_cost": 5,
+                    },
+                },
+            }
+            par = PortAnaRecord(recorder, port_analysis_config, "day")
+            par.generate()
+            job.update_progress(90, "组合回测分析完成")
+
+        # 提取真实回测指标
         metrics = self._extract_metrics(recorder)
 
-        job.update_progress(95, "保存结果 ...")
-        return {"metrics": metrics, "model_path": None}
+        # 保存模型权重
+        job.update_progress(95, "保存模型 ...")
+        model_meta = self._save_model(model, job, metrics)
+
+        job.update_progress(98, "保存结果 ...")
+        return {"metrics": metrics, "model_path": model_meta.get("model_file") if model_meta else None}
+
+    def _save_model(self, model, job: TrainJob, metrics: dict) -> Optional[dict]:
+        """保存训练好的模型到 ModelStore"""
+        try:
+            from qtrader.backend.core.engine.model_store import get_model_store
+            store = get_model_store()
+            meta = store.save_model(
+                model=model,
+                job_id=job.job_id,
+                model_class=job.config.model_class,
+                handler=job.config.handler,
+                market=job.config.market,
+                metrics=metrics,
+                config=job.config.model_dump(),
+            )
+            logger.info(f"Model saved: {meta['model_id']} (version={meta['version']})")
+            return meta
+        except Exception as e:
+            logger.warning(f"Failed to save model: {e}")
+            return None
 
     def _clean_dataset_nan(self, dataset) -> int:
         """清洗数据集中的 NaN 标签行（仅修改 handler 内部数据）"""
@@ -405,14 +469,57 @@ class Trainer:
         return total_dropped
 
     def _extract_metrics(self, recorder) -> dict:
-        """从 recorder 提取分析数据"""
+        """从 recorder 提取回测和信号分析指标"""
+        metrics = {}
+        # 1. 信号分析指标 (IC/ICIR)
         try:
-            analysis = recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
-            if hasattr(analysis, "to_dict"):
-                return {"analysis": "available"}
-        except Exception:
-            pass
-        return {"status": "completed"}
+            sig_metrics = recorder.list_metrics()
+            if sig_metrics:
+                for k in ['IC', 'ICIR', 'Rank IC', 'Rank ICIR']:
+                    if k in sig_metrics:
+                        metrics[k.lower().replace(' ', '_')] = round(sig_metrics[k], 4)
+        except Exception as e:
+            logger.warning(f"Failed to extract signal metrics: {e}")
+
+        # 2. 组合回测指标 (年化收益/Sharpe/最大回撤/信息比率)
+        try:
+            pa = recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
+            import pandas as pd
+            if isinstance(pa, pd.DataFrame) and not pa.empty:
+                # 查找收益列
+                ret_col = None
+                for col in ['excess_return_without_cost', 'excess_return_with_cost', 'return']:
+                    if col in pa.columns:
+                        ret_col = col
+                        break
+                if ret_col:
+                    ret_series = pa[ret_col].dropna()
+                    if len(ret_series) > 0:
+                        from qlib.contrib.evaluate import risk_analysis
+                        risk = risk_analysis(ret_series)
+                        # 提取关键指标
+                        if 'annualized_return' in risk.index:
+                            ann_ret = float(risk.loc['annualized_return'].iloc[0]) if hasattr(risk.loc['annualized_return'], 'iloc') else float(risk.loc['annualized_return'])
+                            metrics['annualized_return'] = round(ann_ret * 100, 2)
+                        if 'max_drawdown' in risk.index:
+                            mdd = float(risk.loc['max_drawdown'].iloc[0]) if hasattr(risk.loc['max_drawdown'], 'iloc') else float(risk.loc['max_drawdown'])
+                            metrics['max_drawdown'] = round(mdd * 100, 2)
+                        if 'information_ratio' in risk.index:
+                            ir = float(risk.loc['information_ratio'].iloc[0]) if hasattr(risk.loc['information_ratio'], 'iloc') else float(risk.loc['information_ratio'])
+                            metrics['information_ratio'] = round(ir, 2)
+                        # 从 std 和 annualized_return 计算 Sharpe
+                        if 'std' in risk.index and 'annualized_return' in risk.index:
+                            std = float(risk.loc['std'].iloc[0]) if hasattr(risk.loc['std'], 'iloc') else float(risk.loc['std'])
+                            ann_ret_raw = float(risk.loc['annualized_return'].iloc[0]) if hasattr(risk.loc['annualized_return'], 'iloc') else float(risk.loc['annualized_return'])
+                            annual_std = std * (252 ** 0.5)
+                            if annual_std > 0:
+                                metrics['sharpe'] = round(ann_ret_raw / annual_std, 2)
+        except Exception as e:
+            logger.warning(f"Failed to extract portfolio metrics: {e}")
+
+        if not metrics:
+            metrics = {"status": "completed"}
+        return metrics
 
     def _fill_feature_nan(self, dataset) -> int:
         """拦截 dataset.prepare()，在返回数据前填充 NaN（LinearModel 需要）"""

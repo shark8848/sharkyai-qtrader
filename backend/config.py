@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     job_store_db_path: str = str(Path.home() / ".qtrader" / "jobs.db")
     job_store_pg_dsn: str = ""  # postgresql://user:pass@host:5432/dbname
 
+    # Model store (trained model persistence)
+    model_store_dir: str = str(Path.home() / ".qtrader" / "models")
+
     # Trading
     broker_type: str = "sim"  # sim | eastmoney
     eastmoney_gateway: str = ""
