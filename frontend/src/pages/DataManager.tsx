@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Card, Select, Button, Space, Tag, message, Progress } from 'antd'
-import { SyncOutlined, CloudSyncOutlined, LineChartOutlined } from '@ant-design/icons'
+import { SyncOutlined, CloudSyncOutlined, LineChartOutlined, SwapOutlined } from '@ant-design/icons'
 import axios from 'axios'
 import StockChart from '../components/StockChart'
 
@@ -21,6 +21,10 @@ export default function DataManager() {
   // 分钟数据同步状态
   const [minSyncStatus, setMinSyncStatus] = useState<any>(null)
   const minSyncPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Qlib 1min 转换状态
+  const [convertStatus, setConvertStatus] = useState<any>(null)
+  const convertPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
     fetchSources()
@@ -86,11 +90,19 @@ export default function DataManager() {
           minSyncPollRef.current = setInterval(pollMinSyncStatus, 2000)
         }
       } catch { /* ignore */ }
+      try {
+        const res3 = await axios.get('/api/data/convert_1min/status')
+        setConvertStatus(res3.data)
+        if (res3.data.status === 'running' && !convertPollRef.current) {
+          convertPollRef.current = setInterval(pollConvertStatus, 2000)
+        }
+      } catch { /* ignore */ }
     }
     initPoll()
     return () => {
       if (syncPollRef.current) clearInterval(syncPollRef.current)
       if (minSyncPollRef.current) clearInterval(minSyncPollRef.current)
+      if (convertPollRef.current) clearInterval(convertPollRef.current)
     }
   }, [])
 
@@ -117,6 +129,35 @@ export default function DataManager() {
       if (res.data.status === 'done' || res.data.status === 'error') {
         if (minSyncPollRef.current) clearInterval(minSyncPollRef.current)
         minSyncPollRef.current = null
+        if (res.data.status === 'done') message.success(res.data.message)
+        else if (res.data.status === 'error') message.error(res.data.message)
+      }
+    } catch { /* ignore */ }
+  }
+
+  // === Qlib 1min 转换 ===
+  const startConvert = async () => {
+    try {
+      const res = await axios.post('/api/data/convert_1min')
+      if (res.data.error) {
+        message.warning(res.data.error)
+        return
+      }
+      message.info('Parquet → Qlib 1min 转换已启动')
+      convertPollRef.current = setInterval(pollConvertStatus, 2000)
+      pollConvertStatus()
+    } catch {
+      message.error('启动转换失败')
+    }
+  }
+
+  const pollConvertStatus = async () => {
+    try {
+      const res = await axios.get('/api/data/convert_1min/status')
+      setConvertStatus(res.data)
+      if (res.data.status === 'done' || res.data.status === 'error') {
+        if (convertPollRef.current) clearInterval(convertPollRef.current)
+        convertPollRef.current = null
         if (res.data.status === 'done') message.success(res.data.message)
         else if (res.data.status === 'error') message.error(res.data.message)
       }
@@ -217,6 +258,32 @@ export default function DataManager() {
               )}
             </div>
           )}
+          {/* Convert to Qlib 1min */}
+          <div style={{ marginTop: 16, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
+            <Button
+              icon={<SwapOutlined spin={convertStatus?.status === 'running'} />}
+              onClick={startConvert}
+              loading={convertStatus?.status === 'running'}
+              block
+            >
+              转换为 Qlib 1min（高频训练用）
+            </Button>
+            {convertStatus?.qlib_stocks > 0 && convertStatus.status !== 'running' && (
+              <p style={{ fontSize: 12, color: '#aaa', margin: '8px 0 0' }}>
+                已转换: {convertStatus.qlib_stocks} 只股票，{convertStatus.qlib_bars || 0} 个时间戳
+              </p>
+            )}
+            {convertStatus && convertStatus.status === 'running' && (
+              <div style={{ marginTop: 8 }}>
+                <Progress
+                  percent={convertStatus.progress}
+                  status="active"
+                  size="small"
+                />
+                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>{convertStatus.message}</div>
+              </div>
+            )}
+          </div>
         </Card>
       </div>
 

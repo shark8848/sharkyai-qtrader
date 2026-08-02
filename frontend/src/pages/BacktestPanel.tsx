@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Card, Form, Select, DatePicker, Button, Row, Col, Statistic,
   message, Space, Progress, Badge, Modal, Input, Tooltip, Popconfirm, Tag,
-  Collapse, InputNumber, Divider, Switch, AutoComplete,
+  Collapse, InputNumber, Divider, Switch, AutoComplete, Rate,
 } from 'antd'
 import {
   PlusOutlined, SearchOutlined, DeleteOutlined, DownloadOutlined,
@@ -39,6 +39,7 @@ interface ModelMeta {
   job_id: string
   model_class: string
   size_bytes: number
+  rating?: number
 }
 
 const statusIcon = (s: string, size = 16) => {
@@ -184,6 +185,13 @@ const HYPERPARAMS: Record<string, ParamDef[]> = {
     { key: 'batch_size', label: 'Batch Size', type: 'number', default: 2000, min: 64, max: 8192, step: 64 },
     { key: 'early_stop', label: 'Early Stop', type: 'number', default: 20, min: 1, max: 100, step: 1 },
   ],
+  HFLGBModel: [
+    { key: 'learning_rate', label: '学习率', type: 'number', default: 0.01, min: 0.001, max: 1, step: 0.001 },
+    { key: 'max_depth', label: '最大深度', type: 'number', default: 8, min: 1, max: 20, step: 1 },
+    { key: 'num_leaves', label: '叶子数', type: 'number', default: 150, min: 2, max: 1024, step: 1 },
+    { key: 'lambda_l1', label: 'L1 正则', type: 'number', default: 1.5, min: 0, max: 100, step: 0.1 },
+    { key: 'lambda_l2', label: 'L2 正则', type: 'number', default: 1, min: 0, max: 100, step: 0.1 },
+  ],
 }
 
 export default function BacktestPanel() {
@@ -191,6 +199,7 @@ export default function BacktestPanel() {
   const [models, setModels] = useState<ModelMeta[]>([])
   const [search, setSearch] = useState('')
   const [createOpen, setCreateOpen] = useState(false)
+  const [deleteJobId, setDeleteJobId] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [form] = Form.useForm()
   const selectedModel = Form.useWatch('model_class', form)
@@ -425,11 +434,9 @@ export default function BacktestPanel() {
                     onClick={() => handleDownload(model.model_id, model.model_class)} />
                 </Tooltip>
               )}
-              <Popconfirm title="确定删除此任务？" onConfirm={() => handleDelete(job.job_id)} okText="删除" cancelText="取消">
-                <Tooltip title="删除任务">
-                  <Button type="text" size="small" danger icon={<DeleteOutlined />} />
-                </Tooltip>
-              </Popconfirm>
+              <Tooltip title="删除任务">
+                <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => setDeleteJobId(job.job_id)} />
+              </Tooltip>
             </Space>
           }
         >
@@ -500,16 +507,30 @@ export default function BacktestPanel() {
             </Row>
           ) : null}
 
-          {/* 模型信息 + 预测按钮 */}
+          {/* 模型信息 + 星级评分 + 预测按钮 */}
           {model && (
             <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #f0f0f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span style={{ fontSize: 11, color: '#999' }}>
                 <RocketOutlined style={{ marginRight: 4 }} />
                 模型 {model.model_id} (v{model.version}) · {(model.size_bytes / 1024).toFixed(0)}KB
               </span>
-              <Button size="small" type="link" icon={<LineChartOutlined />} onClick={() => openPredict(model)}>
-                预测
-              </Button>
+              <Space size={8}>
+                <Rate
+                  count={5}
+                  value={model.rating || 0}
+                  style={{ fontSize: 14, color: '#1890ff' }}
+                  onChange={(val) => {
+                    axios.patch(`/api/models/${model.model_id}/rating`, null, { params: { rating: val } })
+                      .then(() => {
+                        setModels(prev => prev.map(m => m.model_id === model.model_id ? { ...m, rating: val } : m))
+                      })
+                      .catch(() => message.error('评分保存失败'))
+                  }}
+                />
+                <Button size="small" type="link" icon={<LineChartOutlined />} onClick={() => openPredict(model)}>
+                  预测
+                </Button>
+              </Space>
             </div>
           )}
         </Card>
@@ -572,6 +593,23 @@ export default function BacktestPanel() {
               <Form.Item label="模型类型" name="model_class" initialValue="LGBModel" rules={[{ required: true }]}>
                 <Select
                   showSearch
+                  onChange={(val: string) => {
+                    if (val === 'HFLGBModel') {
+                      form.setFieldsValue({
+                        handler: 'HighFreqHandler',
+                        train_range: [dayjs('2026-07-09'), dayjs('2026-07-22')],
+                        valid_range: [dayjs('2026-07-23'), dayjs('2026-07-27')],
+                        test_range: [dayjs('2026-07-28'), dayjs('2026-07-31')],
+                      })
+                    } else {
+                      form.setFieldsValue({
+                        handler: 'Alpha158',
+                        train_range: [dayjs('2019-01-01'), dayjs('2024-12-31')],
+                        valid_range: [dayjs('2025-01-01'), dayjs('2025-06-30')],
+                        test_range: [dayjs('2025-07-01'), dayjs('2026-07-31')],
+                      })
+                    }
+                  }}
                   options={[
                     { label: '树模型 / 集成', options: [
                       { value: 'LGBModel', label: 'LightGBM' },
@@ -593,16 +631,23 @@ export default function BacktestPanel() {
                       { value: 'GATs', label: 'GATs (图注意力)' },
                       { value: 'SFM_Model', label: 'SFM (频谱特征)' },
                     ]},
+                    { label: '高频模型 (1min)', options: [
+                      { value: 'HFLGBModel', label: 'HF-LightGBM (分钟级)' },
+                    ]},
                   ]}
                 />
               </Form.Item>
             </Col>
             <Col span={12}>
               <Form.Item label="因子集" name="handler" initialValue="Alpha158" rules={[{ required: true }]}>
-                <Select options={[
-                  { value: 'Alpha158', label: 'Alpha158' },
-                  { value: 'Alpha360', label: 'Alpha360' },
-                ]} />
+                <Select
+                  disabled={selectedModel === 'HFLGBModel'}
+                  options={[
+                    { value: 'Alpha158', label: 'Alpha158' },
+                    { value: 'Alpha360', label: 'Alpha360' },
+                    { value: 'HighFreqHandler', label: 'HighFreq (分钟级因子)' },
+                  ]}
+                />
               </Form.Item>
             </Col>
           </Row>
@@ -614,13 +659,13 @@ export default function BacktestPanel() {
               { value: 'all', label: '全市场' },
             ]} />
           </Form.Item>
-          <Form.Item label="训练集" name="train_range" initialValue={[dayjs('2008-01-01'), dayjs('2014-12-31')]}>
+          <Form.Item label="训练集" name="train_range" initialValue={[dayjs('2019-01-01'), dayjs('2024-12-31')]}>
             <RangePicker style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item label="验证集" name="valid_range" initialValue={[dayjs('2015-01-01'), dayjs('2016-12-31')]}>
+          <Form.Item label="验证集" name="valid_range" initialValue={[dayjs('2025-01-01'), dayjs('2025-06-30')]}>
             <RangePicker style={{ width: '100%' }} />
           </Form.Item>
-          <Form.Item label="测试集" name="test_range" initialValue={[dayjs('2017-01-01'), dayjs('2020-08-01')]}>
+          <Form.Item label="测试集" name="test_range" initialValue={[dayjs('2025-07-01'), dayjs('2026-07-31')]}>
             <RangePicker style={{ width: '100%' }} />
           </Form.Item>
 
@@ -682,7 +727,7 @@ export default function BacktestPanel() {
             value={predictSymbol}
             options={stockOptions}
             onSearch={(text) => {
-              setPredictSymbol(text.toUpperCase())
+              setPredictSymbol(text)  // 不做 toUpperCase，避免打断中文输入法组合状态
               if (stockSearchTimer.current) clearTimeout(stockSearchTimer.current)
               if (!text.trim()) { setStockOptions([]); return }
               stockSearchTimer.current = setTimeout(async () => {
@@ -781,18 +826,21 @@ export default function BacktestPanel() {
         title={
           <Space>
             <AreaChartOutlined />
-            训练曲线 — {curvesJob?.job_id}
+            训练看板 — {curvesJob?.job_id}
             {curvesJob && statusTag(curvesJob.status)}
           </Space>
         }
         open={curvesOpen}
         onCancel={closeCurves}
         footer={null}
-        width={900}
+        width={1100}
         destroyOnClose
       >
         {curvesData && curvesData.epochs?.length > 0 ? (
+          curvesData.hf_metrics ? (
+          /* ===== 高频专用看板 ===== */
           <Row gutter={[16, 16]}>
+            {/* Loss 曲线 */}
             <Col span={12}>
               <Plot
                 data={[
@@ -804,44 +852,194 @@ export default function BacktestPanel() {
                 style={{ width: '100%' }}
               />
             </Col>
+            {/* 单位换手收益 */}
+            <Col span={12}>
+              <div style={{ height: 260, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: '#fafafa', borderRadius: 8 }}>
+                <div style={{ color: '#666', fontSize: 13, marginBottom: 8 }}>单位换手收益（bp / 1%换手）</div>
+                <div style={{ fontSize: 42, fontWeight: 700, color: (curvesData.hf_metrics.edge_per_turnover_bp ?? 0) >= 0 ? '#52c41a' : '#ff4d4f' }}>
+                  {curvesData.hf_metrics.edge_per_turnover_bp != null ? curvesData.hf_metrics.edge_per_turnover_bp.toFixed(3) : '--'}
+                </div>
+                <div style={{ color: '#999', fontSize: 12, marginTop: 10 }}>
+                  毛利率 {(curvesData.hf_metrics.cost_breakdown?.gross_alpha_bp ?? 0).toFixed(3)} bp/bar · 缓冲换手 {((curvesData.hf_metrics.avg_turnover ?? 0) * 100).toFixed(1)}%/次（每{curvesData.hf_metrics.rebalance_interval ?? 5}bars调仓） · 原始换手 {((curvesData.hf_metrics.raw_turnover ?? 0) * 100).toFixed(1)}%/bar · {curvesData.hf_metrics.n_bars} bars × {curvesData.hf_metrics.n_stocks} stocks
+                </div>
+              </div>
+            </Col>
+            {/* 成本分解 */}
             <Col span={12}>
               <Plot
                 data={[
-                  { x: curvesData.epochs, y: curvesData.train_ic, type: 'scatter', mode: 'lines', name: 'Train IC', line: { color: '#52c41a', width: 1.5 } },
-                  { x: curvesData.epochs, y: curvesData.valid_ic, type: 'scatter', mode: 'lines', name: 'Valid IC', line: { color: '#faad14', width: 1.5 } },
+                  {
+                    values: [curvesData.hf_metrics.cost_breakdown?.fee, curvesData.hf_metrics.cost_breakdown?.slippage, curvesData.hf_metrics.cost_breakdown?.impact].map(v => Math.abs(v ?? 0)),
+                    labels: ['手续费', '滑点', '冲击成本'],
+                    type: 'pie', hole: 0.45,
+                    marker: { colors: ['#1890ff', '#faad14', '#ff4d4f'] },
+                    textinfo: 'label+percent',
+                    hovertemplate: '%{label}: %{value:.4f} bp<extra></extra>',
+                  },
                 ]}
-                layout={{ title: { text: 'IC 走势 (Information Coefficient)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: 'Epoch' } } }}
+                layout={{ title: { text: `成本分解（净α ${curvesData.hf_metrics.cost_breakdown?.net_alpha_bp ?? '--'} bp/bar）` }, height: 260, margin: { l: 20, r: 20, t: 40, b: 20 }, showlegend: true, legend: { orientation: 'h', y: -0.1 } }}
                 config={{ responsive: true, displayModeBar: false }}
                 style={{ width: '100%' }}
               />
             </Col>
+            {/* 分桶成交后收益 */}
             <Col span={12}>
               <Plot
                 data={[
-                  { x: curvesData.epochs, y: curvesData.lr, type: 'scatter', mode: 'lines+markers', name: 'Learning Rate', line: { color: '#722ed1', width: 1.5 }, marker: { size: 4 } },
+                  {
+                    x: ['D1','D2','D3','D4','D5','D6','D7','D8','D9','D10'],
+                    y: curvesData.hf_metrics.decile_net_bp,
+                    type: 'bar',
+                    marker: { color: (curvesData.hf_metrics.decile_net_bp || []).map((v: number) => v >= 0 ? '#52c41a' : '#ff4d4f') },
+                  },
                 ]}
-                layout={{ title: { text: '学习率 (Learning Rate)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: 'Epoch' } } }}
+                layout={{ title: { text: '分桶成交后收益（bp/bar，已扣执行成本）' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: '预测分桶（D1=最低 → D10=最高）' } }, yaxis: { title: { text: 'bp' }, zeroline: true, zerolinecolor: '#ddd' } }}
                 config={{ responsive: true, displayModeBar: false }}
                 style={{ width: '100%' }}
               />
             </Col>
+            {/* 信号半衰期 */}
             <Col span={12}>
               <Plot
                 data={[
-                  { x: curvesData.epochs, y: curvesData.grad_norm, type: 'scatter', mode: 'lines', name: 'Gradient Norm', line: { color: '#13c2c2', width: 1.5 }, fill: 'tozeroy', fillcolor: 'rgba(19,194,194,0.1)' },
+                  { x: curvesData.hf_metrics.half_life?.horizons, y: curvesData.hf_metrics.half_life?.top_decile, type: 'scatter', mode: 'lines+markers', name: 'Top组前向收益', line: { color: '#1890ff', width: 2 } },
+                  { x: curvesData.hf_metrics.half_life?.horizons, y: curvesData.hf_metrics.half_life?.ls, type: 'scatter', mode: 'lines+markers', name: 'Long-Short', line: { color: '#722ed1', width: 2 } },
                 ]}
-                layout={{ title: { text: '梯度范数 (Gradient Norm, L2)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: 'Epoch' } } }}
+                layout={{ title: { text: '信号半衰期（预测后 N bars 收益衰减）' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: 'Horizon (bars)' }, dtick: 5 }, yaxis: { title: { text: 'bp' }, zeroline: true, zerolinecolor: '#ddd' } }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </Col>
+            {/* 容量曲线 */}
+            <Col span={12}>
+              <Plot
+                data={[
+                  { x: curvesData.hf_metrics.capacity?.aum, y: curvesData.hf_metrics.capacity?.net_alpha_bp, type: 'scatter', mode: 'lines+markers', name: 'Net Alpha', line: { color: '#13c2c2', width: 2 }, fill: 'tozeroy', fillcolor: 'rgba(19,194,194,0.08)' },
+                ]}
+                layout={{ title: { text: '容量曲线（资金规模 vs 净Alpha）' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: 'AUM（亿元）' }, type: 'log' }, yaxis: { title: { text: 'bp/bar' }, zeroline: true, zerolinecolor: '#ff4d4f', zerolinewidth: 2 } }}
                 config={{ responsive: true, displayModeBar: false }}
                 style={{ width: '100%' }}
               />
             </Col>
           </Row>
+          ) : (
+          /* ===== 通用看板（日线模型） ===== */
+          <Row gutter={[16, 16]}>
+            {/* Loss 曲线 */}
+            <Col span={12}>
+              <Plot
+                data={[
+                  { x: curvesData.epochs, y: curvesData.train_loss, type: 'scatter', mode: 'lines', name: 'Train Loss', line: { color: '#1890ff', width: 1.5 } },
+                  { x: curvesData.epochs, y: curvesData.valid_loss, type: 'scatter', mode: 'lines', name: 'Valid Loss', line: { color: '#ff4d4f', width: 1.5 } },
+                ]}
+                layout={{ title: { text: '损失曲线 (Loss)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: 'Epoch' } } }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </Col>
+            {/* RankIC + 滚动均值 */}
+            <Col span={12}>
+              {curvesData.signal_curves ? (
+                <Plot
+                  data={[
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.rank_ic, type: 'scatter', mode: 'lines', name: 'RankIC', line: { color: 'rgba(24,144,255,0.4)', width: 1 } },
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.rank_ic_ma20, type: 'scatter', mode: 'lines', name: 'MA20', line: { color: '#1890ff', width: 2 } },
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.rank_ic_ma60, type: 'scatter', mode: 'lines', name: 'MA60', line: { color: '#ff4d4f', width: 2 } },
+                  ]}
+                  layout={{ title: { text: 'RankIC（验证集）+ 滚动均值' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: '日期' } }, yaxis: { zeroline: true, zerolinecolor: '#ddd' } }}
+                  config={{ responsive: true, displayModeBar: false }}
+                  style={{ width: '100%' }}
+                />
+              ) : <div style={{ height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>{curvesJob?.status === 'running' ? '信号曲线计算中...' : '该任务无信号曲线数据（需重新训练）'}</div>}
+            </Col>
+            {/* RankICIR */}
+            <Col span={12}>
+              {curvesData.signal_curves ? (
+                <Plot
+                  data={[
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.rank_icir, type: 'scatter', mode: 'lines', name: 'RankICIR', line: { color: '#722ed1', width: 2 }, fill: 'tozeroy', fillcolor: 'rgba(114,46,209,0.08)' },
+                  ]}
+                  layout={{ title: { text: 'RankICIR（累计信息比率）' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: '日期' } }, yaxis: { zeroline: true, zerolinecolor: '#ddd' } }}
+                  config={{ responsive: true, displayModeBar: false }}
+                  style={{ width: '100%' }}
+                />
+              ) : <div style={{ height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>{curvesJob?.status === 'running' ? '信号曲线计算中...' : '该任务无信号曲线数据（需重新训练）'}</div>}
+            </Col>
+            {/* Long-Short 净值 + Net Alpha */}
+            <Col span={12}>
+              {curvesData.signal_curves ? (
+                <Plot
+                  data={[
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.ls_cum, type: 'scatter', mode: 'lines', name: 'Long-Short 累计', line: { color: '#1890ff', width: 2 } },
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.net_alpha_cum, type: 'scatter', mode: 'lines', name: 'Net Alpha（扣费后）', line: { color: '#52c41a', width: 2, dash: 'dot' } },
+                  ]}
+                  layout={{ title: { text: 'Long-Short 净值 & 成本后净Alpha' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: '日期' } }, yaxis: { zeroline: true, zerolinecolor: '#ddd' } }}
+                  config={{ responsive: true, displayModeBar: false }}
+                  style={{ width: '100%' }}
+                />
+              ) : <div style={{ height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>{curvesJob?.status === 'running' ? '信号曲线计算中...' : '该任务无信号曲线数据（需重新训练）'}</div>}
+            </Col>
+            {/* 分层累计收益 */}
+            <Col span={12}>
+              {curvesData.signal_curves?.decile_cum ? (
+                <Plot
+                  data={[
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.decile_cum.D10, type: 'scatter', mode: 'lines', name: 'Top (D10)', line: { color: '#ff4d4f', width: 2 } },
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.decile_cum.D1, type: 'scatter', mode: 'lines', name: 'Bottom (D1)', line: { color: '#1890ff', width: 2 } },
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.decile_cum.D5, type: 'scatter', mode: 'lines', name: 'Mid (D5)', line: { color: '#faad14', width: 1.5, dash: 'dash' } },
+                  ]}
+                  layout={{ title: { text: '分层累计收益（Decile）' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: '日期' } }, yaxis: { zeroline: true, zerolinecolor: '#ddd' } }}
+                  config={{ responsive: true, displayModeBar: false }}
+                  style={{ width: '100%' }}
+                />
+              ) : <div style={{ height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>{curvesJob?.status === 'running' ? '信号曲线计算中...' : '该任务无信号曲线数据（需重新训练）'}</div>}
+            </Col>
+            {/* 换手率 */}
+            <Col span={12}>
+              {curvesData.signal_curves ? (
+                <Plot
+                  data={[
+                    { x: curvesData.signal_curves.dates, y: curvesData.signal_curves.turnover, type: 'scatter', mode: 'lines', name: 'Turnover', line: { color: '#13c2c2', width: 1.5 }, fill: 'tozeroy', fillcolor: 'rgba(19,194,194,0.1)' },
+                  ]}
+                  layout={{ title: { text: '换手率 (Turnover)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: '日期' } }, yaxis: { rangemode: 'tozero', tickformat: '.0%' } }}
+                  config={{ responsive: true, displayModeBar: false }}
+                  style={{ width: '100%' }}
+                />
+              ) : <div style={{ height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#999' }}>{curvesJob?.status === 'running' ? '信号曲线计算中...' : '该任务无信号曲线数据（需重新训练）'}</div>}
+            </Col>
+          </Row>
+          )
         ) : (
           <div style={{ textAlign: 'center', padding: '40px 0', color: '#999' }}>
             {curvesJob?.status === 'running' ? <LoadingOutlined spin style={{ fontSize: 24, marginBottom: 8 }} /> : null}
-            <div>{curvesJob?.status === 'running' ? '训练进行中，曲线实时更新中...' : '暂无训练曲线数据'}</div>
+            <div>{curvesJob?.status === 'running' ? '训练进行中，数据实时更新中...' : '暂无训练曲线数据'}</div>
           </div>
         )}
+      </Modal>
+
+      {/* 删除确认弹窗 */}
+      <Modal
+        title={null}
+        open={!!deleteJobId}
+        onCancel={() => setDeleteJobId(null)}
+        centered
+        width={420}
+        footer={
+          <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+            <Button onClick={() => setDeleteJobId(null)}>取消</Button>
+            <Button danger type="primary" onClick={() => { if (deleteJobId) handleDelete(deleteJobId); setDeleteJobId(null) }}>
+              确认删除
+            </Button>
+          </Space>
+        }
+      >
+        <div style={{ textAlign: 'center', padding: '12px 0' }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+          <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 8 }}>确定删除此训练任务？</div>
+          <div style={{ fontSize: 13, color: '#ff4d4f', fontWeight: 500 }}>
+            删除后，训练结果数据和模型文件均将被永久删除，无法恢复。
+          </div>
+        </div>
       </Modal>
     </div>
   )

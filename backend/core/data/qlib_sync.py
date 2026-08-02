@@ -49,10 +49,9 @@ class QlibSyncTask:
         self.finished_at: Optional[str] = None
 
     def to_dict(self):
-        # overall = disk baseline + newly synced in this run
-        overall_synced = self.base_synced + self.success_stocks
-        # Use full market size as denominator for overall percentage
+        # overall = disk baseline + newly synced in this run (capped at total)
         full_total = max(self.total_stocks + self.skip_stocks, self.total_stocks, 1)
+        overall_synced = min(self.base_synced + self.success_stocks, full_total)
         overall_pct = round(overall_synced / full_total * 100, 1)
         fail_stocks = max(0, self.done_stocks - self.success_stocks - self.skip_stocks)
         return {

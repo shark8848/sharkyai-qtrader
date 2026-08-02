@@ -14,6 +14,10 @@ from qtrader.backend.core.data.minute_sync import (
     get_minute_calendar,
     get_minute_stocks_for_date,
 )
+from qtrader.backend.core.data.minute_to_qlib import (
+    start_convert,
+    get_convert_status,
+)
 
 router = APIRouter()
 
@@ -38,7 +42,7 @@ async def get_stock_list(keyword: Optional[str] = Query(None, description="Searc
     """Get stock list, optionally filtered by keyword."""
     df = await data_manager.get_stock_list()
     if keyword and not df.empty:
-        mask = df["symbol"].str.contains(keyword, na=False) | df["name"].str.contains(keyword, na=False)
+        mask = df["symbol"].str.contains(keyword, na=False, case=False) | df["name"].str.contains(keyword, na=False)
         df = df[mask]
     records = df.to_dict(orient="records")
     return {"total": len(df), "data": records}
@@ -174,3 +178,19 @@ async def raw_kline(symbol: str, days: int = Query(120, ge=1, le=5000)):
         "rows": len(df),
         "data": df.to_dict(orient="records") if not df.empty else [],
     }
+
+
+# === Qlib 1min conversion endpoints ===
+
+
+@router.post("/convert_1min")
+async def convert_1min():
+    """Convert Parquet minute data to Qlib 1min .bin format."""
+    result = start_convert()
+    return result
+
+
+@router.get("/convert_1min/status")
+async def convert_1min_status():
+    """Get conversion progress."""
+    return get_convert_status()

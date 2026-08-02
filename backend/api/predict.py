@@ -21,6 +21,12 @@ class PredictRequest(BaseModel):
     end_date: Optional[str] = None    # default: today
 
 
+class MinutePredictRequest(BaseModel):
+    symbol: str  # e.g. "sh600519"
+    date: Optional[str] = None  # default: latest available
+    model_id: Optional[str] = None  # default: latest HF model
+
+
 @router.get("/data_range")
 async def get_data_range():
     """Return the available data date range."""
@@ -55,13 +61,52 @@ async def run_predict(req: PredictRequest):
     end_date = req.end_date or "2020-09-25"
     start_date = req.start_date or "2020-03-01"
 
+    # 高频模型走分钟级预测路径
+    handler_name = meta.get("handler", "Alpha158")
+    if handler_name == "HighFreqHandler":
+        try:
+            result = _predict_minute(
+                symbol=req.symbol,
+                date=end_date,  # 用结束日期作为预测目标日
+                model_id=req.model_id,
+            )
+            # 适配前端统一格式
+            merged_data = []
+            for a, p in zip(result.get("actual", []), result.get("predicted", [])):
+                merged_data.append({
+                    "date": a["time"],
+                    "close": a["close"],
+                    "score": p["score"],
+                })
+            sig = result.get("signal", {})
+            direction = "看多" if sig.get("direction") == "看涨" else "看空"
+            return {
+                "model_id": result.get("model_id", req.model_id),
+                "symbol": req.symbol,
+                "start_date": start_date,
+                "end_date": end_date,
+                "handler": handler_name,
+                "total_days": result.get("total_bars", len(merged_data)),
+                "data": merged_data,
+                "signal": {
+                    "direction": direction,
+                    "latest_score": sig.get("latest_score"),
+                    "avg_score": sig.get("avg_score"),
+                    "recent_avg": sig.get("avg_score"),
+                    "strength": sig.get("strength", 0),
+                },
+            }
+        except Exception as e:
+            logger.exception(f"Minute prediction failed for {req.symbol}")
+            raise HTTPException(status_code=500, detail=str(e))
+
     try:
         result = _predict_single_stock(
             model_id=req.model_id,
             symbol=req.symbol,
             start_date=start_date,
             end_date=end_date,
-            handler=meta.get("handler", "Alpha158"),
+            handler=handler_name,
             market=meta.get("market", "csi300"),
             train_config=meta.get("config", {}),
         )
@@ -274,5 +319,209 @@ def _predict_single_stock(
             "avg_score": round(avg_score, 6),
             "recent_avg": round(recent_avg, 6),
             "strength": strength_pct,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# High-frequency minute prediction
+# ---------------------------------------------------------------------------
+
+
+@router.post("/minute")
+async def run_minute_predict(req: MinutePredictRequest):
+    """Use HFLGBModel to predict minute-level price movement."""
+    try:
+        result = _predict_minute(
+            symbol=req.symbol,
+            date=req.date,
+            model_id=req.model_id,
+        )
+        return result
+    except Exception as e:
+        logger.exception(f"Minute prediction failed for {req.symbol}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _predict_minute(symbol: str, date: Optional[str], model_id: Optional[str]) -> dict:
+    """Minute-level prediction using Qlib high-freq pipeline."""
+    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+    from pathlib import Path
+
+    qlib_1min_dir = Path.home() / ".qlib" / "qlib_data" / "cn_data_1min"
+    if not qlib_1min_dir.exists():
+        raise ValueError(
+            "Qlib 1min 数据目录不存在，请先在数据管理页面执行「转换为 Qlib 1min」"
+        )
+
+    # Initialize qlib with high-freq config
+    import qlib
+    from qlib.constant import REG_CN
+    from qlib.config import HIGH_FREQ_CONFIG
+    from qlib.contrib.ops.high_freq import DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut
+
+    qlib.init(
+        provider_uri=str(qlib_1min_dir),
+        region=REG_CN,
+        custom_ops=[DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut],
+        expression_cache=None,
+    )
+
+    # Determine date range
+    from qlib.data import D
+    cal = D.calendar(freq="1min")
+    if len(cal) == 0:
+        raise ValueError("Qlib 1min 日历为空，请先转换数据")
+
+    # If date specified, filter to that day; otherwise use last day
+    import pandas as pd
+    cal_series = pd.Series(cal)
+    if date:
+        day_mask = cal_series.dt.strftime("%Y-%m-%d") == date
+        if day_mask.sum() == 0:
+            raise ValueError(f"日期 {date} 无 1min 数据")
+        day_cal = cal_series[day_mask]
+    else:
+        # Use last available day
+        last_date = cal[-1].strftime("%Y-%m-%d")
+        day_mask = cal_series.dt.strftime("%Y-%m-%d") == last_date
+        day_cal = cal_series[day_mask]
+        date = last_date
+
+    start_time = str(day_cal.iloc[0])
+    end_time = str(day_cal.iloc[-1])
+
+    # Load model
+    from qtrader.backend.core.engine.model_store import get_model_store
+    store = get_model_store()
+
+    if model_id:
+        model = store.load_model(model_id)
+        meta = store.get_meta(model_id)
+    else:
+        # Find latest HFLGBModel
+        all_models = store.list_models()
+        hf_models = [m for m in all_models if m.get("model_class") == "HFLGBModel"]
+        if not hf_models:
+            raise ValueError("无可用 HFLGBModel 模型，请先训练高频模型")
+        meta = hf_models[-1]
+        model = store.load_model(meta["model_id"])
+        model_id = meta["model_id"]
+
+    # Build dataset for prediction using HighFreqHandler
+    from qlib.utils import init_instance_by_config
+
+    # Use a wider range for handler fitting
+    cal_dates = sorted(cal_series.dt.strftime("%Y-%m-%d").unique())
+    fit_start = str(cal[0])
+    fit_end = start_time
+
+    handler_config = {
+        "class": "HighFreqHandler",
+        "module_path": "qlib.contrib.data.highfreq_handler",
+        "kwargs": {
+            "start_time": fit_start,
+            "end_time": end_time,
+            "fit_start_time": fit_start,
+            "fit_end_time": fit_end,
+            "instruments": [symbol.upper()],
+            "infer_processors": [
+                {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": False}},
+                {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
+            ],
+        },
+    }
+
+    dataset_config = {
+        "class": "DatasetH",
+        "module_path": "qlib.data.dataset",
+        "kwargs": {
+            "handler": handler_config,
+            "segments": {
+                "train": (fit_start, fit_end),
+                "test": (start_time, end_time),
+            },
+        },
+    }
+
+    dataset = init_instance_by_config(dataset_config)
+
+    # Generate predictions
+    pred = model.predict(dataset, segment="test")
+
+    # Get actual price data for the day
+    df_price = D.features(
+        [symbol.upper()],
+        ["$close", "$volume"],
+        start_time=start_time,
+        end_time=end_time,
+        freq="1min",
+    )
+
+    # Align prediction with price
+    if isinstance(pred, pd.Series):
+        pred_df = pred.to_frame("score")
+    else:
+        pred_df = pd.DataFrame({"score": pred})
+
+    if isinstance(pred_df.index, pd.MultiIndex):
+        pred_df = pred_df.xs(symbol.upper(), level="instrument")
+    if isinstance(df_price.index, pd.MultiIndex):
+        df_price = df_price.xs(symbol.upper(), level="instrument")
+
+    pred_df.index = pd.to_datetime(pred_df.index)
+    df_price.index = pd.to_datetime(df_price.index)
+
+    merged = df_price.join(pred_df, how="inner").dropna(subset=["score"])
+
+    # Build response
+    actual = []
+    predicted = []
+    for ts, row in merged.iterrows():
+        time_str = ts.strftime("%Y-%m-%d %H:%M:%S")
+        actual.append({"time": time_str, "close": round(float(row["$close"]), 3)})
+        predicted.append({"time": time_str, "score": round(float(row["score"]), 6)})
+
+    # Signal summary
+    if predicted:
+        scores = [p["score"] for p in predicted]
+        avg_score = sum(scores) / len(scores)
+        latest_score = scores[-1]
+        recent_10 = scores[-10:] if len(scores) >= 10 else scores
+        recent_avg = sum(recent_10) / len(recent_10)
+
+        direction = "看涨" if latest_score > avg_score else "看跌"
+        strength = abs(latest_score - avg_score) / (max(scores) - min(scores) + 1e-8)
+        strength_pct = min(round(strength * 100), 100)
+
+        current_price = actual[-1]["close"] if actual else 0
+        # Estimate target: score > 0 means expected up movement
+        change_pct = round(latest_score * 100, 3)
+        target_price = round(current_price * (1 + latest_score), 3)
+    else:
+        direction = "无数据"
+        strength_pct = 0
+        current_price = 0
+        target_price = 0
+        change_pct = 0
+        avg_score = 0
+        recent_avg = 0
+        latest_score = 0
+
+    return {
+        "model_id": model_id,
+        "symbol": symbol,
+        "date": date,
+        "total_bars": len(actual),
+        "actual": actual,
+        "predicted": predicted,
+        "signal": {
+            "direction": direction,
+            "strength": strength_pct,
+            "current_price": current_price,
+            "target_price": target_price,
+            "change_pct": change_pct,
+            "latest_score": round(latest_score, 6),
+            "avg_score": round(avg_score, 6),
         },
     }

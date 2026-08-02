@@ -32,9 +32,9 @@ class TrainConfig(BaseModel):
     model_class: str = "LGBModel"
     handler: str = "Alpha158"
     market: str = "csi300"
-    train_range: list[str] = ["2008-01-01", "2014-12-31"]
-    valid_range: list[str] = ["2015-01-01", "2016-12-31"]
-    test_range: list[str] = ["2017-01-01", "2020-08-01"]
+    train_range: list[str] = ["2019-01-01", "2024-12-31"]
+    valid_range: list[str] = ["2025-01-01", "2025-06-30"]
+    test_range: list[str] = ["2025-07-01", "2026-07-31"]
     model_kwargs: dict[str, Any] = {}
 
 
@@ -182,6 +182,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.001,
             "batch_size": 2000,
             "early_stop": 20,
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -197,6 +198,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.001,
             "batch_size": 2000,
             "early_stop": 20,
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -212,6 +214,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.001,
             "batch_size": 2000,
             "early_stop": 20,
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -228,6 +231,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.0001,
             "batch_size": 2048,
             "early_stop": 5,
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -244,6 +248,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.0001,
             "batch_size": 2000,
             "early_stop": 20,
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -256,6 +261,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.001,
             "batch_size": 2000,
             "early_stop": 20,
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -265,6 +271,7 @@ MODEL_REGISTRY: dict[str, dict] = {
         "default_kwargs": {
             "lr": 0.001,
             "optimizer": "adam",
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -280,6 +287,7 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.001,
             "early_stop": 20,
             "base_model": "GRU",
+            "metric": "ic",
             "GPU": -1,
         },
     },
@@ -295,8 +303,25 @@ MODEL_REGISTRY: dict[str, dict] = {
             "lr": 0.001,
             "batch_size": 2000,
             "early_stop": 20,
+            "metric": "ic",
             "GPU": -1,
         },
+    },
+    "HFLGBModel": {
+        "class": "HFLGBModel",
+        "module_path": "qlib.contrib.model.highfreq_gdbt_model",
+        "default_kwargs": {
+            "loss": "binary",
+            "metric": ["binary_logloss", "auc"],
+            "verbosity": -1,
+            "learning_rate": 0.01,
+            "max_depth": 8,
+            "num_leaves": 150,
+            "lambda_l1": 1.5,
+            "lambda_l2": 1,
+            "num_threads": 20,
+        },
+        "high_freq": True,
     },
 }
 
@@ -308,6 +333,10 @@ HANDLER_REGISTRY: dict[str, dict] = {
     "Alpha360": {
         "class": "Alpha360",
         "module_path": "qlib.contrib.data.handler",
+    },
+    "HighFreqHandler": {
+        "class": "HighFreqHandler",
+        "module_path": "qlib.contrib.data.highfreq_handler",
     },
 }
 
@@ -323,6 +352,8 @@ class Trainer:
         self._jobs: dict[str, TrainJob] = {}
         self._data_dir = data_dir or str(Path.home() / ".qlib" / "qlib_data" / "cn_data")
         self._qlib_initialized = False
+        # 训练信号量：同一时间只允许一个任务执行数据加载+训练，防止 Qlib 并发死锁
+        self._train_semaphore = threading.Semaphore(1)
         # 持久化存储
         self._store = job_store
         if self._store is None:
@@ -413,15 +444,33 @@ class Trainer:
         except Exception as e:
             logger.warning(f"Failed to persist job {job.job_id}: {e}")
 
-    def _ensure_qlib(self):
+    def _ensure_qlib(self, high_freq: bool = False):
         """延迟初始化 qlib"""
-        if not self._qlib_initialized:
-            os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
-            import qlib
-            from qlib.constant import REG_CN
-            qlib.init(provider_uri=self._data_dir, region=REG_CN)
+        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+        import qlib
+        from qlib.constant import REG_CN
+
+        if high_freq:
+            from pathlib import Path
+            from qlib.contrib.ops.high_freq import DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut
+            hf_dir = str(Path.home() / ".qlib" / "qlib_data" / "cn_data_1min")
+            qlib.init(
+                provider_uri=hf_dir,
+                region=REG_CN,
+                custom_ops=[DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut],
+                expression_cache=None,  # 高频Select算子与DiskExpressionCache不兼容
+                kernels=1,  # 单进程避免uvicorn内多进程死锁
+            )
+            logger.info("Qlib initialized for HIGH-FREQ training (1min)")
+        elif not self._qlib_initialized:
+            qlib.init(
+                provider_uri=self._data_dir,
+                region=REG_CN,
+                expression_cache="DiskExpressionCache",
+                kernels=min(os.cpu_count() or 4, 16),
+            )
             self._qlib_initialized = True
-            logger.info("Qlib initialized for training")
+            logger.info("Qlib initialized for training (expression cache enabled)")
 
     def submit(self, config: TrainConfig) -> TrainJob:
         """提交训练任务"""
@@ -444,7 +493,13 @@ class Trainer:
 
         loop = asyncio.get_event_loop()
         try:
-            result = await loop.run_in_executor(None, self._run_training, job)
+            # 信号量保证同一时间只有一个任务在加载数据+训练，防止 Qlib 并发死锁
+            await loop.run_in_executor(None, self._train_semaphore.acquire)
+            job.update_progress(1, "获得执行权，开始训练...")
+            try:
+                result = await loop.run_in_executor(None, self._run_training, job)
+            finally:
+                self._train_semaphore.release()
             job.status = JobStatus.SUCCESS
             job.metrics = result.get("metrics")
             job.model_path = result.get("model_path")
@@ -460,17 +515,18 @@ class Trainer:
 
     def _run_training(self, job: TrainJob) -> dict:
         """同步训练逻辑（在线程中执行）"""
+        config = job.config
+        model_info = MODEL_REGISTRY.get(config.model_class, MODEL_REGISTRY["LGBModel"])
+        is_high_freq = model_info.get("high_freq", False)
+
         job.update_progress(5, "正在初始化 Qlib ...")
-        self._ensure_qlib()
+        self._ensure_qlib(high_freq=is_high_freq)
 
         from qlib.utils import init_instance_by_config
         from qlib.workflow import R
         from qlib.workflow.record_temp import SignalRecord, PortAnaRecord, SigAnaRecord
 
-        config = job.config
-
         # 构建模型配置
-        model_info = MODEL_REGISTRY.get(config.model_class, MODEL_REGISTRY["LGBModel"])
         model_kwargs = {**model_info["default_kwargs"], **config.model_kwargs}
         model_config = {
             "class": model_info["class"],
@@ -480,29 +536,79 @@ class Trainer:
         job.update_progress(10, f"模型配置: {config.model_class}")
 
         # 构建数据集配置
-        handler_info = HANDLER_REGISTRY.get(config.handler, HANDLER_REGISTRY["Alpha158"])
-        dataset_config = {
-            "class": "DatasetH",
-            "module_path": "qlib.data.dataset",
-            "kwargs": {
-                "handler": {
-                    "class": handler_info["class"],
-                    "module_path": handler_info["module_path"],
-                    "kwargs": {
-                        "start_time": config.train_range[0],
-                        "end_time": config.test_range[1],
-                        "fit_start_time": config.train_range[0],
-                        "fit_end_time": config.train_range[1],
-                        "instruments": config.market,
+        if is_high_freq:
+            # High-freq: build grouped handler (feature + label) for HFLGBModel
+            from qlib.contrib.data.highfreq_handler import HighFreqHandler as _HFH
+            _tmp = _HFH.__new__(_HFH)
+            feature_fields, feature_names = _tmp.get_feature_config()
+            # Label: 10-min future return（匹配信号半衰期 10~20 bars）
+            label_fields = ["Ref($close, -10)/$close - 1"]
+            label_names = ["LABEL0"]
+
+            handler_config = {
+                "class": "DataHandlerLP",
+                "module_path": "qlib.data.dataset.handler",
+                "kwargs": {
+                    "start_time": config.train_range[0],
+                    "end_time": config.test_range[1],
+                    "instruments": config.market,
+                    "data_loader": {
+                        "class": "QlibDataLoader",
+                        "kwargs": {
+                            "config": {
+                                "feature": (feature_fields, feature_names),
+                                "label": (label_fields, label_names),
+                            },
+                            "swap_level": False,
+                            "freq": "1min",
+                        },
+                    },
+                    "infer_processors": [
+                        {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": False, "fit_start_time": config.train_range[0], "fit_end_time": config.train_range[1]}},
+                        {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
+                    ],
+                    "learn_processors": [
+                        {"class": "DropnaLabel"},
+                        {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
+                    ],
+                },
+            }
+            dataset_config = {
+                "class": "DatasetH",
+                "module_path": "qlib.data.dataset",
+                "kwargs": {
+                    "handler": handler_config,
+                    "segments": {
+                        "train": tuple(config.train_range),
+                        "valid": tuple(config.valid_range),
+                        "test": tuple(config.test_range),
                     },
                 },
-                "segments": {
-                    "train": tuple(config.train_range),
-                    "valid": tuple(config.valid_range),
-                    "test": tuple(config.test_range),
+            }
+        else:
+            handler_info = HANDLER_REGISTRY.get(config.handler, HANDLER_REGISTRY["Alpha158"])
+            dataset_config = {
+                "class": "DatasetH",
+                "module_path": "qlib.data.dataset",
+                "kwargs": {
+                    "handler": {
+                        "class": handler_info["class"],
+                        "module_path": handler_info["module_path"],
+                        "kwargs": {
+                            "start_time": config.train_range[0],
+                            "end_time": config.test_range[1],
+                            "fit_start_time": config.train_range[0],
+                            "fit_end_time": config.train_range[1],
+                            "instruments": config.market,
+                        },
+                    },
+                    "segments": {
+                        "train": tuple(config.train_range),
+                        "valid": tuple(config.valid_range),
+                        "test": tuple(config.test_range),
+                    },
                 },
-            },
-        }
+            }
 
         job.update_progress(15, f"加载数据集 {config.handler} | 股票池 {config.market} ...")
 
@@ -569,45 +675,96 @@ class Trainer:
             sar.generate()
             job.update_progress(75, "信号分析完成")
 
+            # 计算信号分析曲线（RankIC/ICIR/Long-Short/分层收益/换手率）
+            job.update_progress(76, "计算信号分析曲线 ...")
+            try:
+                self._compute_signal_curves(model, dataset, job)
+            except Exception as sc_err:
+                logger.warning(f"信号曲线计算失败: {sc_err}")
+
+            # 高频模型：计算高频专用指标（单位换手收益/成本分解/半衰期/容量曲线）
+            if is_high_freq:
+                job.update_progress(77, "计算高频专用指标 ...")
+                try:
+                    self._compute_hf_metrics(model, dataset, job)
+                except Exception as hf_err:
+                    logger.warning(f"高频指标计算失败: {hf_err}")
+
             # 组合回测分析（可能因 qlib 版本兼容性问题失败，不影响模型训练结果）
-            job.update_progress(76, "正在执行组合回测分析 ...")
+            job.update_progress(78, "正在执行组合回测分析 ...")
             try:
                 port_analysis_config = {
+                    # 回测执行器：模拟逐日交易
                     "executor": {
                         "class": "SimulatorExecutor",
                         "module_path": "qlib.backtest.executor",
                         "kwargs": {
-                            "time_per_step": "day",
-                            "generate_portfolio_metrics": True,
+                            "time_per_step": "day",           # 每步时间粒度（日级调仓）
+                            "generate_portfolio_metrics": True, # 生成组合指标报告（收益/回撤/换手等）
                         },
                     },
+                    # 交易策略：Top-K 淘汰制
                     "strategy": {
                         "class": "TopkDropoutStrategy",
                         "module_path": "qlib.contrib.strategy.signal_strategy",
                         "kwargs": {
-                            "signal": (model, dataset),
-                            "topk": 50,
-                            "n_drop": 5,
+                            "signal": (model, dataset),  # 信号来源：模型预测分
+                            "topk": 30,     # 持仓数量：持有预测分最高的 30 只股票
+                            "n_drop": 3,    # 每日淘汰数：最多替换 3 只（换手率上限 10%/日）
                         },
                     },
+                    # 回测环境与交易成本
                     "backtest": {
-                        "start_time": config.test_range[0],
-                        "end_time": config.test_range[1],
-                        "account": 100000000,
-                        "benchmark": "SH000300",
+                        "start_time": config.test_range[0],  # 回测起始日（= 测试集开始）
+                        "end_time": config.test_range[1],    # 回测结束日（= 测试集结束）
+                        "account": 100000000,      # 初始资金：1 亿元
+                        "benchmark": "SH000300",   # 基准：沪深300指数（用于计算超额收益）
                         "exchange_kwargs": {
-                            "freq": "day",
-                            "limit_threshold": 0.095,
-                            "deal_price": "close",
-                            "open_cost": 0.0005,
-                            "close_cost": 0.0015,
-                            "min_cost": 5,
+                            "freq": "day",              # 交易频率：日级
+                            "limit_threshold": 0.095,   # 涨跌停阈值：9.5%（超过则无法成交）
+                            "deal_price": "vwap",       # 成交价：用当日均价（比 close 更贴近实际）
+                            "open_cost": 0.0003,        # 买入费率：万3（佣金）
+                            "close_cost": 0.0013,       # 卖出费率：万13（印花税0.05% + 佣金万3 + 过户费）
+                            "min_cost": 5,              # 最低手续费：5元/笔
                         },
                     },
                 }
                 par = PortAnaRecord(recorder, port_analysis_config, "day")
                 par.generate()
                 job.update_progress(90, "组合回测分析完成")
+
+                # 用实际组合换手率替换信号级换手率
+                try:
+                    import pandas as pd
+                    report_df = recorder.load_object("portfolio_analysis/report_normal_1day.pkl")
+                    if isinstance(report_df, pd.DataFrame) and "turnover" in report_df.columns:
+                        real_to = report_df["turnover"].tolist()
+                        curves = job.train_history.get("signal_curves")
+                        if curves and "turnover" in curves:
+                            n_sig = len(curves["turnover"])
+                            n_bt = len(real_to)
+                            # 对齐长度：回测天数可能略少于信号曲线天数
+                            if n_bt >= n_sig:
+                                curves["turnover"] = [round(float(x), 4) for x in real_to[:n_sig]]
+                            else:
+                                # 回测短于信号曲线：前部分用回测值，尾部补 None
+                                aligned = [round(float(x), 4) for x in real_to]
+                                aligned += [None] * (n_sig - n_bt)
+                                curves["turnover"] = aligned
+                            # 用实际换手率重算净 alpha
+                            import numpy as _np
+                            # 从 ls_cum 反推每日 ls 收益
+                            ls_cum = curves.get("ls_cum", [])
+                            if ls_cum:
+                                ls_daily = _np.diff([0] + ls_cum)
+                                to_arr = _np.array([x if x is not None else 0 for x in curves["turnover"][:len(ls_daily)]])
+                                cost_rate = 0.0015
+                                net_alpha = ls_daily[:len(to_arr)] - to_arr * cost_rate * 2
+                                curves["net_alpha_cum"] = _np.cumsum(net_alpha).round(6).tolist()
+                            logger.info(f"换手率已替换为实际组合回测值 (mean={_np.nanmean([x for x in curves['turnover'] if x is not None]):.2%})")
+                except Exception as to_err:
+                    logger.warning(f"替换实际换手率失败: {to_err}")
+
             except Exception as bt_err:
                 logger.warning(f"组合回测分析失败（不影响模型训练）: {bt_err}")
                 job.update_progress(90, f"组合回测跳过（{type(bt_err).__name__}），模型训练已完成")
@@ -826,22 +983,373 @@ class Trainer:
                 for i, s in enumerate(valid_scores):
                     job.train_history["valid_ic"].append(safe_val(s))
         else:
-            # 树模型: evals_result = {"train": {"l2": [...]}, "valid": {"l2": [...]}}
+            # 树模型: evals_result 有两种格式
+            # LightGBM: {"train": {"l2": [...]}, "valid": {"l2": [...]}}
+            # XGBoost:  {"train": [v1, v2, ...], "valid": [v1, v2, ...]}  (已被 flatten)
             for split_name in ["train", "valid"]:
                 if split_name not in evals_result:
                     continue
                 split_data = evals_result[split_name]
-                # 取第一个指标（如 l2, rmse, logloss）
-                metric_name = next(iter(split_data), None)
-                if metric_name is None:
+                if isinstance(split_data, dict):
+                    # LightGBM 格式：取第一个指标
+                    metric_name = next(iter(split_data), None)
+                    if metric_name is None:
+                        continue
+                    values = split_data[metric_name]
+                elif isinstance(split_data, list):
+                    # XGBoost 格式：已经是纯数值列表
+                    values = split_data
+                else:
                     continue
-                values = split_data[metric_name]
                 for i, v in enumerate(values):
                     if split_name == "train":
                         job.train_history["epochs"].append(i + 1)
                         job.train_history["train_loss"].append(safe_val(v))
                     else:
                         job.train_history["valid_loss"].append(safe_val(v))
+
+    def _compute_signal_curves(self, model, dataset, job: TrainJob):
+        """计算5项信号分析曲线：RankIC、RankICIR、Long-Short净值、分层收益、换手率"""
+        import pandas as pd
+        import numpy as np
+        from scipy.stats import spearmanr
+        from qlib.data.dataset.handler import DataHandlerLP
+
+        # 获取测试集预测和标签
+        pred = model.predict(dataset)
+        if isinstance(pred, pd.Series):
+            pred = pred.to_frame("score")
+        label_df = dataset.prepare("test", col_set="label", data_key=DataHandlerLP.DK_I)
+        if isinstance(label_df, pd.DataFrame) and label_df.shape[1] == 1:
+            label_series = label_df.iloc[:, 0]
+        else:
+            label_series = label_df
+
+        # 合并 pred 和 label
+        df = pd.DataFrame({"pred": pred.iloc[:, 0] if isinstance(pred, pd.DataFrame) else pred, "label": label_series})
+        df = df.dropna()
+        if df.empty or len(df.index.get_level_values(0).unique()) < 3:
+            return
+
+        dates = sorted(df.index.get_level_values(0).unique())
+        daily_rank_ic = []
+        daily_ls_ret = []  # Long-Short return
+        daily_turnover = []
+        decile_rets = {f"D{i}": [] for i in range(1, 11)}  # D1=bottom, D10=top
+        prev_top_set = None
+
+        for dt in dates:
+            day_df = df.loc[dt]
+            if len(day_df) < 10:
+                daily_rank_ic.append(None)
+                daily_ls_ret.append(None)
+                daily_turnover.append(None)
+                for k in decile_rets:
+                    decile_rets[k].append(None)
+                continue
+
+            # 1. RankIC (Spearman)
+            ic, _ = spearmanr(day_df["pred"], day_df["label"])
+            daily_rank_ic.append(round(float(ic), 6) if not np.isnan(ic) else None)
+
+            # 2. Long-Short: top 10% - bottom 10%
+            n = len(day_df)
+            k = max(int(n * 0.1), 1)
+            sorted_df = day_df.sort_values("pred")
+            bottom_ret = sorted_df["label"].iloc[:k].mean()
+            top_ret = sorted_df["label"].iloc[-k:].mean()
+            daily_ls_ret.append(round(float(top_ret - bottom_ret), 6))
+
+            # 3. Decile returns
+            try:
+                day_df_copy = day_df.copy()
+                day_df_copy["decile"] = pd.qcut(day_df_copy["pred"].rank(method="first"), 10, labels=False) + 1
+                for d in range(1, 11):
+                    mask = day_df_copy["decile"] == d
+                    decile_rets[f"D{d}"].append(round(float(day_df_copy.loc[mask, "label"].mean()), 6) if mask.sum() > 0 else None)
+            except Exception:
+                for k2 in decile_rets:
+                    decile_rets[k2].append(None)
+
+            # 4. Turnover: 换手率 = |当日top集合 - 前一日top集合| / k
+            top_set = set(sorted_df.index[-k:])
+            if prev_top_set is not None and len(prev_top_set) > 0:
+                turnover = 1.0 - len(top_set & prev_top_set) / max(len(top_set), 1)
+                daily_turnover.append(round(float(turnover), 4))
+            else:
+                daily_turnover.append(None)
+            prev_top_set = top_set
+
+        # 计算滚动 RankIC 均值
+        ic_series = pd.Series(daily_rank_ic)
+        rank_ic_ma20 = ic_series.rolling(20, min_periods=1).mean().round(6).tolist()
+        rank_ic_ma60 = ic_series.rolling(60, min_periods=1).mean().round(6).tolist()
+
+        # 计算累计 RankICIR
+        ic_arr = np.array([x if x is not None else 0 for x in daily_rank_ic])
+        cum_mean = np.cumsum(ic_arr) / np.arange(1, len(ic_arr) + 1)
+        cum_std = pd.Series(ic_arr).expanding().std().fillna(1).values
+        cum_std[cum_std == 0] = 1
+        rank_icir = (cum_mean / cum_std).round(4).tolist()
+
+        # Long-Short 累计净值
+        ls_arr = np.array([x if x is not None else 0 for x in daily_ls_ret])
+        ls_cum = np.cumsum(ls_arr).round(6).tolist()
+
+        # 分层累计收益
+        decile_cum = {}
+        for k3, vals in decile_rets.items():
+            arr = np.array([x if x is not None else 0 for x in vals])
+            decile_cum[k3] = np.cumsum(arr).round(6).tolist()
+
+        # 成本后净alpha（单边 0.15% 费率）
+        cost_rate = 0.0015
+        to_arr = np.array([x if x is not None else 0 for x in daily_turnover])
+        net_alpha = (ls_arr - to_arr * cost_rate * 2)
+        net_alpha_cum = np.cumsum(net_alpha).round(6).tolist()
+
+        # 存储
+        date_strs = [str(d)[:10] for d in dates]
+        job.train_history["signal_curves"] = {
+            "dates": date_strs,
+            "rank_ic": daily_rank_ic,
+            "rank_ic_ma20": rank_ic_ma20,
+            "rank_ic_ma60": rank_ic_ma60,
+            "rank_icir": rank_icir,
+            "ls_cum": ls_cum,
+            "net_alpha_cum": net_alpha_cum,
+            "turnover": daily_turnover,
+            "decile_cum": decile_cum,
+        }
+        logger.info(f"Signal curves computed: {len(dates)} days")
+
+    def _compute_hf_metrics(self, model, dataset, job: TrainJob):
+        """计算高频专用指标：单位换手收益、成本分解、分桶成交后收益、信号半衰期、容量曲线"""
+        import pandas as pd
+        import numpy as np
+        from scipy.stats import spearmanr
+        from qlib.data.dataset.handler import DataHandlerLP
+        from qlib.data import D
+
+        # 成本参数（A股高频口径）
+        FEE_RATE = 0.0003       # 手续费 单边万3
+        SLIPPAGE_RATE = 0.0005  # 滑点 单边5bp
+        IMPACT_COEF = 0.1       # 冲击系数（平方根冲击模型）
+
+        pred = model.predict(dataset)
+        if isinstance(pred, pd.Series):
+            pred = pred.to_frame("score")
+        label_df = dataset.prepare("test", col_set="label", data_key=DataHandlerLP.DK_I)
+        label_series = label_df.iloc[:, 0] if isinstance(label_df, pd.DataFrame) else label_df
+
+        df = pd.DataFrame({"pred": pred.iloc[:, 0], "label": label_series}).dropna()
+        if df.empty:
+            return
+
+        # 按 bar 级别横截面分组（每个 datetime = 一个横截面）
+        cs_dts = sorted(df.index.get_level_values(1).unique())
+        cs_data = {dt: grp.droplevel(1) for dt, grp in df.groupby(level=1) if len(grp) >= 10}
+        if len(cs_data) < 5:
+            return
+        cs_dts = sorted(cs_data.keys())
+        n_bars = len(cs_dts)
+
+        stocks = sorted(df.index.get_level_values(0).unique())
+        stock_pos = {s: i for i, s in enumerate(stocks)}
+        n_stocks = len(stocks)
+        k = max(int(n_stocks * 0.1), 1)
+
+        rank_ic_list = []
+        ls_ret_list = []
+        top_mask = np.zeros((n_bars, n_stocks), dtype=bool)
+        decile_sum = np.zeros((n_bars, 10))
+        decile_cnt = np.zeros((n_bars, 10), dtype=int)
+
+        for i, dt in enumerate(cs_dts):
+            day = cs_data[dt]
+            p = day["pred"].values
+            l = day["label"].values
+            # RankIC
+            ic, _ = spearmanr(p, l)
+            rank_ic_list.append(float(ic) if not np.isnan(ic) else 0.0)
+            # Long-Short
+            order = np.argsort(p)
+            ls_ret_list.append(float(l[order[-k:]].mean() - l[order[:k]].mean()))
+            # Top-k 持仓
+            for s in day.index[order[-k:]]:
+                pos = stock_pos.get(s)
+                if pos is not None:
+                    top_mask[i, pos] = True
+            # 分桶收益
+            ranks = pd.Series(p).rank(method="first").values
+            bins = np.minimum((ranks / (len(p) + 1) * 10).astype(int), 9)
+            for b in range(10):
+                m = bins == b
+                decile_cnt[i, b] = int(m.sum())
+                decile_sum[i, b] = float(l[m].sum()) if m.any() else 0.0
+
+        # 换手率（bar 级别）— 原始信号换手
+        turnover_list = [None]
+        for i in range(1, n_bars):
+            prev, cur = top_mask[i - 1], top_mask[i]
+            if prev.any() and cur.any():
+                turnover_list.append(round(float(1.0 - (prev & cur).sum() / max(cur.sum(), 1)), 4))
+            else:
+                turnover_list.append(None)
+
+        # 持仓缓冲：模拟实际执行（每 REBALANCE_INTERVAL bars 调仓，仅替换跌出 top 2k 的持仓）
+        REBALANCE_INTERVAL = 5  # 每 5 bars 调仓一次
+        BUFFER_ZONE = 2  # 持仓保护带：跌出 top k*BUFFER_ZONE 才移除
+        buffered_turnover_list = [None]
+        held = top_mask[0].copy() if n_bars > 0 else np.zeros(n_stocks, dtype=bool)
+        buffered_k = int(held.sum())
+        for i in range(1, n_bars):
+            if i % REBALANCE_INTERVAL == 0:
+                signal_top = top_mask[i]
+                # 保护带：当前持仓只要仍在 top k*BUFFER_ZONE 内就保留
+                order_i = np.argsort(cs_data[cs_dts[i]]["pred"].values)
+                buffer_k = min(buffered_k * BUFFER_ZONE, n_stocks)
+                signal_buffer = np.zeros(n_stocks, dtype=bool)
+                for s in cs_data[cs_dts[i]].index[order_i[-buffer_k:]]:
+                    pos = stock_pos.get(s)
+                    if pos is not None:
+                        signal_buffer[pos] = True
+                # 保留仍在 buffer 区内的持仓，替换跌出的
+                keep = held & signal_buffer
+                n_to_replace = buffered_k - keep.sum()
+                if n_to_replace > 0:
+                    # 从 signal_top 中补充未持有的
+                    candidates = signal_top & (~held)
+                    cand_idx = np.where(candidates)[0][:n_to_replace]
+                    new_held = keep.copy()
+                    new_held[cand_idx] = True
+                    # 如果候选不足，从 buffer 区补充
+                    if new_held.sum() < buffered_k:
+                        extra = signal_buffer & (~new_held)
+                        extra_idx = np.where(extra)[0][:buffered_k - int(new_held.sum())]
+                        new_held[extra_idx] = True
+                    to = float(1.0 - keep.sum() / max(buffered_k, 1))
+                    held = new_held
+                else:
+                    to = 0.0
+                buffered_turnover_list.append(round(to, 4))
+            else:
+                buffered_turnover_list.append(0.0)  # 非调仓 bar 不交易
+
+        ls_arr = np.array(ls_ret_list)
+        to_arr = np.array([t if t is not None else 0.0 for t in turnover_list])
+        avg_to = float(to_arr[1:].mean()) if n_bars > 1 else 0.0
+        # 缓冲后平均换手（按调仓 bar 平均）
+        buf_to_arr = np.array([t if t is not None else 0.0 for t in buffered_turnover_list])
+        rebal_count = max(int(np.sum(buf_to_arr > 0)), 1)
+        avg_buf_to = float(buf_to_arr.sum() / rebal_count)  # 每次调仓的平均换手
+        avg_buf_to_per_bar = float(buf_to_arr.mean())  # 摊薄到每 bar
+
+        # 1. 单位换手收益（bp per 1% turnover）— 使用缓冲后换手
+        mean_ls_bp = float(ls_arr.mean()) * 1e4
+        edge_per_to = round(mean_ls_bp / (avg_buf_to * 100), 4) if avg_buf_to > 1e-8 else None
+
+        # 2. 成本分解（基于缓冲后换手率，摊薄到每 bar）
+        fee_cost = avg_buf_to_per_bar * FEE_RATE * 2
+        slip_cost = avg_buf_to_per_bar * SLIPPAGE_RATE * 2
+        impact_cost = IMPACT_COEF * (avg_buf_to_per_bar ** 2)
+        cost_breakdown = {
+            "fee": round(fee_cost * 1e4, 4),
+            "slippage": round(slip_cost * 1e4, 4),
+            "impact": round(impact_cost * 1e4, 4),
+            "gross_alpha_bp": round(mean_ls_bp, 4),
+            "net_alpha_bp": round((mean_ls_bp - (fee_cost + slip_cost + impact_cost) * 1e4), 4),
+            "raw_turnover": round(avg_to, 4),
+            "buffered_turnover": round(avg_buf_to, 4),
+            "rebalance_interval": REBALANCE_INTERVAL,
+        }
+
+        # 3. 分桶成交后收益（bp/bar，扣除执行成本）
+        with np.errstate(divide="ignore", invalid="ignore"):
+            decile_avg = np.where(decile_cnt > 0, decile_sum / np.maximum(decile_cnt, 1), 0.0)
+        exec_cost_per_bar = (FEE_RATE + SLIPPAGE_RATE) * 2  # 单次建仓双边成本
+        decile_net_bp = [round(float(decile_avg[:, b].mean()) * 1e4 - exec_cost_per_bar * 1e4, 4) for b in range(10)]
+
+        # 4. 信号半衰期：加载原始收盘价计算多 horizon 前向收益
+        test_start = str(cs_dts[0])[:10]
+        test_end = str(cs_dts[-1])[:10]
+        instruments = list(stocks)
+        horizons = [1, 2, 5, 10, 20]
+        half_life = {"horizons": horizons, "top_decile": [], "ls": []}
+        avg_vol_per_bar = 5e7  # 默认假设
+
+        try:
+            raw_df = D.features(instruments, ["$close"], start_time=test_start, end_time=test_end, freq="1min")
+            close_wide = raw_df.reset_index().pivot(index="datetime", columns="instrument", values=raw_df.columns[0])
+            common_dts = [dt for dt in cs_dts if dt in close_wide.index]
+            close_mat = close_wide.loc[common_dts, stocks].values
+            dt_pos = {dt: i for i, dt in enumerate(common_dts)}
+
+            for h in horizons:
+                top_rets, ls_rets = [], []
+                for i, dt in enumerate(cs_dts):
+                    cp = dt_pos.get(dt)
+                    if cp is None or cp + h >= len(common_dts):
+                        continue
+                    p0 = close_mat[cp]
+                    p1 = close_mat[cp + h]
+                    valid = np.isfinite(p0) & np.isfinite(p1) & (p0 > 0)
+                    if valid.sum() < 10:
+                        continue
+                    fwd = np.where(valid, p1 / np.where(p0 > 0, p0, 1) - 1, np.nan)
+                    tops = top_mask[i] & valid
+                    bots = (~top_mask[i]) & valid
+                    if tops.sum() > 0:
+                        tr = float(np.nanmean(np.where(tops, fwd, np.nan)))
+                        if np.isfinite(tr):
+                            top_rets.append(tr)
+                    if tops.sum() > 0 and bots.sum() > 0:
+                        br = float(np.nanmean(np.where(bots, fwd, np.nan)))
+                        if np.isfinite(br):
+                            ls_rets.append(tr - br)
+                half_life["top_decile"].append(round(float(np.mean(top_rets)) * 1e4, 4) if top_rets else None)
+                half_life["ls"].append(round(float(np.mean(ls_rets)) * 1e4, 4) if ls_rets else None)
+
+            # 5. 容量曲线：加载成交量估算市场容量
+            try:
+                vol_df = D.features(instruments, ["If(IsNull($volume), 0, $volume)"],
+                                    start_time=test_start, end_time=test_end, freq="1min")
+                vol_wide = vol_df.reset_index().pivot(index="datetime", columns="instrument", values=vol_df.columns[0])
+                vol_mat = vol_wide.reindex(index=close_wide.index, columns=stocks).values
+                price_mat = close_wide[stocks].values
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    tval = np.where(np.isfinite(vol_mat) & np.isfinite(price_mat), vol_mat * price_mat, np.nan)
+                avg_vol_per_bar = float(np.nanmean(np.nansum(tval, axis=1)))
+                if not np.isfinite(avg_vol_per_bar) or avg_vol_per_bar <= 0:
+                    avg_vol_per_bar = 5e7
+            except Exception:
+                pass
+        except Exception as hl_err:
+            logger.warning(f"半衰期/容量计算跳过: {hl_err}")
+
+        aum_levels = [0.1, 0.5, 1, 5, 10, 50, 100, 500]  # 亿元
+        capacity = {"aum": aum_levels, "net_alpha_bp": []}
+        for aum in aum_levels:
+            participation = (aum * 1e8 / n_stocks) / max(avg_vol_per_bar, 1.0)
+            cost = (FEE_RATE + SLIPPAGE_RATE) * 2 + IMPACT_COEF * np.sqrt(max(participation, 0))
+            capacity["net_alpha_bp"].append(round(mean_ls_bp - cost * 1e4, 4))
+
+        job.train_history["hf_metrics"] = {
+            "n_bars": n_bars,
+            "n_stocks": n_stocks,
+            "avg_turnover": round(avg_buf_to, 4),
+            "raw_turnover": round(avg_to, 4),
+            "rebalance_interval": REBALANCE_INTERVAL,
+            "edge_per_turnover_bp": edge_per_to,
+            "cost_breakdown": cost_breakdown,
+            "decile_net_bp": decile_net_bp,
+            "half_life": half_life,
+            "capacity": capacity,
+            "rank_ic_ma": pd.Series(rank_ic_list).rolling(20, min_periods=1).mean().round(6).tolist(),
+            "ls_cum": np.cumsum(ls_arr).round(6).tolist(),
+            "bars_idx": list(range(n_bars)),
+        }
+        logger.info(f"HF metrics computed: {n_bars} bars x {n_stocks} stocks")
 
     def _fill_feature_nan(self, dataset) -> int:
         """拦截 dataset.prepare()，在返回数据前填充 NaN（PyTorch/Linear 模型需要）"""

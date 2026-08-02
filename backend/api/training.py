@@ -3,7 +3,7 @@
 import math
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.responses import FileResponse
 
 from qtrader.backend.core.engine.trainer import trainer, TrainConfig
@@ -42,7 +42,7 @@ async def get_train_config():
         "available_models": [
             "LGBModel", "XGBModel", "CatBoostModel", "LinearModel", "DEnsembleModel",
             "GRU", "LSTM", "ALSTM", "TransformerModel", "TCN",
-            "TabnetModel", "DNNModelPytorch", "GATs", "SFM_Model",
+            "TabnetModel", "DNNModelPytorch", "GATs", "SFM_Model", "HFLGBModel",
         ],
         "available_handlers": ["Alpha158", "Alpha360"],
         "available_markets": ["csi300", "csi500", "csi800", "csi100"],
@@ -141,6 +141,24 @@ async def delete_model(model_id: str):
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
     store.delete_model(model_id)
     return {"message": f"Model {model_id} deleted"}
+
+
+@router.patch("/models/{model_id}/rating")
+async def set_model_rating(model_id: str, rating: int = Query(..., ge=0, le=5)):
+    """设置模型星级评分（0=无星, 1~5=星级）。"""
+    store = get_model_store()
+    meta = store.get_meta(model_id)
+    if not meta:
+        raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
+    # 更新 meta.json 中的 rating 字段
+    from pathlib import Path
+    import json
+    meta_file = Path(store._base) / model_id / "meta.json"
+    if meta_file.exists():
+        meta["rating"] = rating
+        with open(meta_file, "w") as f:
+            json.dump(meta, f, indent=2, ensure_ascii=False)
+    return {"model_id": model_id, "rating": rating}
 
 
 @router.get("/models/{model_id}/download")

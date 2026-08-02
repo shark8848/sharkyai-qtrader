@@ -12,16 +12,20 @@
 
 - **多数据源**：AKShare / Qlib 统一抽象，运行时热切换，SQLite 增量缓存
 - **分钟级数据**：1/5/15/30/60 分钟 K 线同步与查询，APScheduler 收盘自动同步
-- **AI 训练引擎**：桥接 Qlib 生态，支持 14 种模型（LightGBM / XGBoost / CatBoost / Linear / GRU / LSTM / ALSTM / Transformer / TCN / TabNet / DNN / GATs / SFM / DoubleEnsemble）
-- **单股预测**：加载已训练模型，对单只股票生成预测评分 + 多空信号 + 强度分析
+- **AI 训练引擎**：桥接 Qlib 生态，支持 15 种模型（LightGBM / XGBoost / CatBoost / Linear / GRU / LSTM / ALSTM / Transformer / TCN / TabNet / DNN / GATs / SFM / DoubleEnsemble / **HFLGBModel**）
+- **高频模型支持**：HFLGBModel + HighFreqHandler，基于 1min 数据训练，持仓缓冲执行（REBALANCE_INTERVAL=5, BUFFER_ZONE=2）
+- **训练看板**：6 维信号分析图表（Loss / RankIC / RankICIR / Long-Short 净值 / 分层收益 / 换手率）+ 高频专用指标（单位换手收益 / 成本分解 / 信号半衰期 / 容量曲线）
+- **组合回测**：TopkDropoutStrategy（topk=30, n_drop=3）+ VWAP 成交 + 真实换手率 + 年化收益/Sharpe/最大回撤/信息比率
+- **单股预测**：加载已训练模型，对单只股票生成预测评分 + 多空信号 + 强度分析（自动识别高频模型走分钟级路径）
 - **模型版本管理**：训练模型自动持久化，版本号递增，支持按任务查询与下载
+- **模型星级评分**：对已训练模型标注 1~5 星评级，持久化存储，便于筛选最优模型
 - **回测引擎**：TopkDropout 策略 + 评估器（Sharpe、最大回撤、Calmar、信息比率）+ Plotly 图表 + 多策略对比
 - **交易模块**：SimBroker 内存撮合（T+1）+ 东方财富 jvQuant API 接口
 - **风控体系**：单笔限额 / 日交易次数 / 仓位比例 / 涨停过滤 / 日亏损熔断
 - **策略引擎**：信号 → 风控过滤 → 下单执行 + 定时调仓 + 运行日志
 - **任务持久化**：训练/回测任务支持 SQLite（默认）或 PostgreSQL 后端
 - **实时进度**：训练进度百分比 + 日志时间线 + WebSocket 推送
-- **本地 K 线读取**：直接读取 Qlib .bin 文件，无需网络请求
+- **本地 K 线读取**：直接读取 Qlib .bin 文件，无需网络请求，支持后复权/不复权切换
 - **同步断点续传**：checkpoint 机制保证中断后精确恢复，避免重复拉取
 - **服务管理**：`qtrader.sh` 一键启停脚本（start / stop / restart / status / logs）
 
@@ -62,25 +66,6 @@ cd frontend && npm install && cd ..
 
 自定义端口：`QTRADER_PORT=9000 QTRADER_FE_PORT=3000 ./qtrader.sh start`
 
-### 项目结构
-
-```
-qtrader/
-├── backend/
-│   ├── api/            # FastAPI 路由 (data / training / trading / predict / ws)
-│   ├── core/
-│   │   ├── data/       # 多数据源抽象 + 缓存 + 分钟级同步
-│   │   ├── engine/     # 训练器 / 回测 / 评估 / 模型存储 / 任务存储
-│   │   └── trading/    # 券商 / 风控 / 订单 / 策略
-│   ├── config.py       # 全局配置 (环境变量 QTRADER_* / .env)
-│   └── main.py         # 应用入口
-├── frontend/
-│   └── src/pages/      # Dashboard / DataManager / BacktestPanel / TradingPanel / Settings
-├── logs/               # 运行日志
-├── qtrader.sh          # 服务管理脚本
-└── requirements.txt    # Python 依赖
-```
-
 ### API 概览
 
 **数据管理** `/api/data`
@@ -108,6 +93,7 @@ qtrader/
 - `GET /by-job/{job_id}` — 按训练任务查找模型
 - `GET /{model_id}/download` — 下载模型文件
 - `DELETE /{model_id}` — 删除模型
+- `PATCH /{model_id}/rating?rating=N` — 设置模型星级评分（0~5）
 
 **回测** `/api/backtest`
 - `POST /run` — 执行回测（异步）
@@ -134,7 +120,8 @@ qtrader/
 
 **预测** `/api/predict`
 - `GET /data_range` — 获取可用数据日期范围
-- `POST /run` — 单股预测（返回评分序列 + 多空信号 + 强度）
+- `POST /run` — 单股预测（自动识别高频/日频模型，返回评分序列 + 多空信号 + 强度）
+- `POST /minute` — 分钟级高频预测（单日 bar 级信号）
 
 **WebSocket**：`ws://localhost:8000/ws` — 实时推送（quotes / orders / training / position 频道）
 
@@ -171,16 +158,20 @@ A full-stack quantitative trading platform built on the [Qlib](https://github.co
 
 - **Multi-Source Data**: Unified AKShare / Qlib abstraction with runtime hot-switching and SQLite incremental caching
 - **Minute-Level Data**: 1/5/15/30/60-min K-line sync & query, APScheduler auto-sync after market close
-- **AI Training Engine**: Bridges the Qlib ecosystem — supports 14 models (LightGBM / XGBoost / CatBoost / Linear / GRU / LSTM / ALSTM / Transformer / TCN / TabNet / DNN / GATs / SFM / DoubleEnsemble)
-- **Single-Stock Prediction**: Load trained models to generate prediction scores + bullish/bearish signal + strength analysis
+- **AI Training Engine**: Bridges the Qlib ecosystem — supports 15 models (LightGBM / XGBoost / CatBoost / Linear / GRU / LSTM / ALSTM / Transformer / TCN / TabNet / DNN / GATs / SFM / DoubleEnsemble / **HFLGBModel**)
+- **High-Frequency Model**: HFLGBModel + HighFreqHandler, trained on 1min data with position buffering (REBALANCE_INTERVAL=5, BUFFER_ZONE=2)
+- **Training Dashboard**: 6-dimension signal analysis charts (Loss / RankIC / RankICIR / Long-Short NAV / Decile Returns / Turnover) + HF-specific metrics (return per turnover / cost decomposition / signal half-life / capacity curve)
+- **Portfolio Backtest**: TopkDropoutStrategy (topk=30, n_drop=3) + VWAP execution + real turnover + annualized return/Sharpe/max drawdown/IR
+- **Single-Stock Prediction**: Load trained models to generate prediction scores + bullish/bearish signal + strength (auto-routes HF models to minute-level path)
 - **Model Versioning**: Trained models auto-persisted with incremental versioning, queryable by job and downloadable
+- **Model Star Rating**: Rate trained models 1–5 stars, persisted to storage for easy best-model selection
 - **Backtesting Engine**: TopkDropout strategy + evaluator (Sharpe, max drawdown, Calmar, IR) with Plotly charts + multi-strategy comparison
 - **Trading Module**: SimBroker in-memory matching (T+1) + EastMoney jvQuant API integration
 - **Risk Control**: Per-order limit / daily trade cap / position ratio / limit-up filter / daily loss circuit breaker
 - **Strategy Engine**: Signal → risk filter → order execution with scheduled rebalancing + runtime logs
 - **Job Persistence**: Training/backtest jobs stored in SQLite (default) or PostgreSQL
 - **Real-Time Progress**: Training progress percentage + log timeline + WebSocket push
-- **Local K-line Reader**: Read Qlib .bin files directly without network requests
+- **Local K-line Reader**: Read Qlib .bin files directly without network requests, supports hfq/raw price toggle
 - **Sync Checkpoint**: Resume from exact interruption point, avoiding duplicate fetches
 - **Service Management**: One-command `qtrader.sh` script (start / stop / restart / status / logs)
 
@@ -217,25 +208,6 @@ cd frontend && npm install && cd ..
 
 Custom ports: `QTRADER_PORT=9000 QTRADER_FE_PORT=3000 ./qtrader.sh start`
 
-### Project Structure
-
-```
-qtrader/
-├── backend/
-│   ├── api/            # FastAPI routes (data / training / trading / predict / ws)
-│   ├── core/
-│   │   ├── data/       # Multi-source abstraction + caching + minute sync
-│   │   ├── engine/     # Trainer / backtest / evaluator / model store / job store
-│   │   └── trading/    # Broker / risk / order / strategy
-│   ├── config.py       # Global config (env QTRADER_* / .env)
-│   └── main.py         # App entry point
-├── frontend/
-│   └── src/pages/      # Dashboard / DataManager / BacktestPanel / TradingPanel / Settings
-├── logs/               # Runtime logs
-├── qtrader.sh          # Service management script
-└── requirements.txt    # Python dependencies
-```
-
 ### API Overview
 
 **Data Management** `/api/data`
@@ -263,6 +235,7 @@ qtrader/
 - `GET /by-job/{job_id}` — Find model by training job
 - `GET /{model_id}/download` — Download model file
 - `DELETE /{model_id}` — Delete model
+- `PATCH /{model_id}/rating?rating=N` — Set model star rating (0–5)
 
 **Backtesting** `/api/backtest`
 - `POST /run` — Execute backtest (async)
@@ -289,7 +262,8 @@ qtrader/
 
 **Prediction** `/api/predict`
 - `GET /data_range` — Get available data date range
-- `POST /run` — Single-stock prediction (score series + signal + strength)
+- `POST /run` — Single-stock prediction (auto-detects HF/daily model, returns score series + signal + strength)
+- `POST /minute` — Minute-level HF prediction (single-day bar-level signals)
 
 **WebSocket**: `ws://localhost:8000/ws` — Real-time push (quotes / orders / training / position channels)
 

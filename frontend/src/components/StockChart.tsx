@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { Select, Radio, Spin, Empty, Space } from 'antd'
+import { Select, Radio, Spin, Empty, Space, Button, Card, Tag, message } from 'antd'
+import { ExperimentOutlined } from '@ant-design/icons'
 import { createChart, ColorType, IChartApi, ISeriesApi, UTCTimestamp } from 'lightweight-charts'
 import axios from 'axios'
 
@@ -30,11 +31,15 @@ export default function StockChart() {
   const [hasData, setHasData] = useState(true)
   const [stockOptions, setStockOptions] = useState<{ value: string; label: string }[]>([])
   const [searchLoading, setSearchLoading] = useState(false)
+  // HF prediction state
+  const [predictLoading, setPredictLoading] = useState(false)
+  const [predictSignal, setPredictSignal] = useState<any>(null)
 
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const predictSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
 
   // Load minute dates
   useEffect(() => {
@@ -132,6 +137,7 @@ export default function StockChart() {
     chartRef.current = chart
     candleSeriesRef.current = candleSeries
     volumeSeriesRef.current = volumeSeries
+    predictSeriesRef.current = null  // reset prediction line on chart rebuild
 
     const handleResize = () => {
       if (chartContainerRef.current) {
@@ -201,6 +207,12 @@ export default function StockChart() {
           )
           chartRef.current?.timeScale().fitContent()
         }
+        // Clear prediction when data changes
+        setPredictSignal(null)
+        if (predictSeriesRef.current) {
+          predictSeriesRef.current.setData([])
+          predictSeriesRef.current = null
+        }
       } catch {
         setHasData(false)
       }
@@ -208,6 +220,47 @@ export default function StockChart() {
     }
     fetchData()
   }, [symbol, period, days, date, adjust])
+
+  // HF Predict handler
+  const handlePredict = async () => {
+    if (!symbol || !date) return
+    setPredictLoading(true)
+    try {
+      const res = await axios.post('/api/predict/minute', { symbol, date })
+      const data = res.data
+      setPredictSignal(data.signal)
+
+      // Draw prediction score line on chart
+      if (data.predicted && data.predicted.length > 0 && chartRef.current) {
+        // Remove old prediction series if exists
+        if (predictSeriesRef.current) {
+          chartRef.current.removeSeries(predictSeriesRef.current)
+        }
+        const lineSeries = chartRef.current.addLineSeries({
+          color: '#2196F3',
+          lineWidth: 2,
+          lineStyle: 2, // dashed
+          priceScaleId: 'predict',
+          title: 'HF Score',
+        })
+        lineSeries.priceScale().applyOptions({
+          scaleMargins: { top: 0.1, bottom: 0.6 },
+        })
+        lineSeries.setData(
+          data.predicted.map((p: any) => ({
+            time: toTimestamp(p.time) as UTCTimestamp,
+            value: p.score,
+          }))
+        )
+        predictSeriesRef.current = lineSeries
+      }
+      message.success(`预测完成: ${data.signal.direction} (强度 ${data.signal.strength}%)`)
+    } catch (err: any) {
+      const detail = err.response?.data?.detail || '预测失败'
+      message.error(detail)
+    }
+    setPredictLoading(false)
+  }
 
   return (
     <div>
@@ -251,6 +304,18 @@ export default function StockChart() {
             options={dates.map(d => ({ value: d, label: d }))}
           />
         )}
+        {period === 'minute' && (
+          <Button
+            type="primary"
+            size="small"
+            icon={<ExperimentOutlined />}
+            loading={predictLoading}
+            onClick={handlePredict}
+            ghost
+          >
+            HF预测
+          </Button>
+        )}
       </Space>
 
       <div style={{ position: 'relative', minHeight: 420 }}>
@@ -266,6 +331,24 @@ export default function StockChart() {
         )}
         <div ref={chartContainerRef} style={{ width: '100%' }} />
       </div>
+
+      {/* Prediction signal card */}
+      {predictSignal && (
+        <Card size="small" style={{ marginTop: 12 }}>
+          <Space size="large">
+            <span>
+              信号方向：
+              <Tag color={predictSignal.direction === '看涨' ? 'red' : 'green'}>
+                {predictSignal.direction}
+              </Tag>
+            </span>
+            <span>强度：<b>{predictSignal.strength}%</b></span>
+            <span>当前价：<b>{predictSignal.current_price}</b></span>
+            <span>目标价：<b style={{ color: predictSignal.direction === '看涨' ? '#ef5350' : '#26a69a' }}>{predictSignal.target_price}</b></span>
+            <span>预期涨跌：<b>{predictSignal.change_pct}%</b></span>
+          </Space>
+        </Card>
+      )}
     </div>
   )
 }
