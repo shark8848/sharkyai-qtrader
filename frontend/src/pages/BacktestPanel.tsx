@@ -2,13 +2,14 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Card, Form, Select, DatePicker, Button, Row, Col, Statistic,
   message, Space, Progress, Badge, Modal, Input, Tooltip, Popconfirm, Tag,
-  Collapse, InputNumber, Divider, Switch,
+  Collapse, InputNumber, Divider, Switch, AutoComplete,
 } from 'antd'
 import {
   PlusOutlined, SearchOutlined, DeleteOutlined, DownloadOutlined,
   CheckCircleOutlined, CloseCircleOutlined, LoadingOutlined,
   ClockCircleOutlined, ExperimentOutlined, RocketOutlined,
   LineChartOutlined, DatabaseOutlined, AppstoreOutlined,
+  AreaChartOutlined,
 } from '@ant-design/icons'
 import axios from 'axios'
 import dayjs from 'dayjs'
@@ -208,6 +209,14 @@ export default function BacktestPanel() {
   const [predictLoading, setPredictLoading] = useState(false)
   const [predictResult, setPredictResult] = useState<any>(null)
   const [dataRange, setDataRange] = useState<{ start: string; end: string } | null>(null)
+  const [stockOptions, setStockOptions] = useState<{ value: string; label: React.ReactNode }[]>([])
+  const stockSearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // 训练曲线弹窗状态
+  const [curvesOpen, setCurvesOpen] = useState(false)
+  const [curvesJob, setCurvesJob] = useState<JobStatus | null>(null)
+  const [curvesData, setCurvesData] = useState<any>(null)
+  const curvesPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const fetchAll = useCallback(async () => {
     try {
@@ -333,6 +342,36 @@ export default function BacktestPanel() {
     setPredictLoading(false)
   }
 
+  // 训练曲线
+  const fetchCurves = useCallback(async (jobId: string) => {
+    try {
+      const res = await axios.get(`/api/train/jobs/${jobId}/history`)
+      setCurvesData(res.data)
+    } catch { /* ignore */ }
+  }, [])
+
+  const openCurves = (job: JobStatus) => {
+    setCurvesJob(job)
+    setCurvesData(null)
+    setCurvesOpen(true)
+    fetchCurves(job.job_id)
+    // 运行中的任务动态刷新
+    if (curvesPollRef.current) clearInterval(curvesPollRef.current)
+    if (job.status === 'running' || job.status === 'pending') {
+      curvesPollRef.current = setInterval(() => fetchCurves(job.job_id), 2000)
+    }
+  }
+
+  const closeCurves = () => {
+    setCurvesOpen(false)
+    setCurvesJob(null)
+    setCurvesData(null)
+    if (curvesPollRef.current) {
+      clearInterval(curvesPollRef.current)
+      curvesPollRef.current = null
+    }
+  }
+
   const filtered = jobs
     .filter(j => {
       if (!search.trim()) return true
@@ -376,6 +415,10 @@ export default function BacktestPanel() {
           }
           extra={
             <Space size={4}>
+              <Tooltip title="训练曲线">
+                <Button type="text" size="small" icon={<AreaChartOutlined />}
+                  onClick={() => openCurves(job)} />
+              </Tooltip>
               {model && (
                 <Tooltip title={`下载模型 (${(model.size_bytes / 1024).toFixed(0)}KB)`}>
                   <Button type="text" size="small" icon={<DownloadOutlined />}
@@ -635,12 +678,30 @@ export default function BacktestPanel() {
         destroyOnClose
       >
         <Space style={{ marginBottom: 16 }} wrap>
-          <Input
-            placeholder="股票代码，如 SH600519"
+          <AutoComplete
             value={predictSymbol}
-            onChange={e => setPredictSymbol(e.target.value.toUpperCase())}
-            style={{ width: 160 }}
-          />
+            options={stockOptions}
+            onSearch={(text) => {
+              setPredictSymbol(text.toUpperCase())
+              if (stockSearchTimer.current) clearTimeout(stockSearchTimer.current)
+              if (!text.trim()) { setStockOptions([]); return }
+              stockSearchTimer.current = setTimeout(async () => {
+                try {
+                  const res = await axios.get('/api/data/stocks', { params: { keyword: text.trim() } })
+                  const items = res.data.data || []
+                  setStockOptions(items.slice(0, 20).map((s: any) => ({
+                    value: `${s.market}${s.symbol}`,
+                    label: <Space><span style={{ fontWeight: 500 }}>{s.market}{s.symbol}</span><span style={{ color: '#999' }}>{s.name}</span></Space>,
+                  })))
+                } catch { setStockOptions([]) }
+              }, 300)
+            }}
+            onSelect={(val: string) => { setPredictSymbol(val); setStockOptions([]) }}
+            placeholder="搜索股票代码/名称，如 600519 或 茅台"
+            style={{ width: 240 }}
+          >
+            <Input prefix={<SearchOutlined style={{ color: '#bbb' }} />} />
+          </AutoComplete>
           <RangePicker
             value={predictRange}
             onChange={(v) => { if (v && v[0] && v[1]) setPredictRange([v[0], v[1]]) }}
@@ -703,14 +764,82 @@ export default function BacktestPanel() {
                   margin: { l: 50, r: 50, t: 30, b: 40 },
                   showlegend: true,
                   legend: { orientation: 'h', y: 1.1 },
-                  yaxis: { title: '价格', side: 'left' },
-                  yaxis2: { title: '预测分数', side: 'right', overlaying: 'y' },
+                  yaxis: { title: { text: '价格' }, side: 'left' },
+                  yaxis2: { title: { text: '预测分数' }, side: 'right', overlaying: 'y' },
                   xaxis: { rangeslider: { visible: false } },
                 }}
                 config={{ responsive: true, displayModeBar: false }}
                 style={{ width: '100%' }}
               />
             )}
+          </div>
+        )}
+      </Modal>
+
+      {/* 训练曲线弹窗 */}
+      <Modal
+        title={
+          <Space>
+            <AreaChartOutlined />
+            训练曲线 — {curvesJob?.job_id}
+            {curvesJob && statusTag(curvesJob.status)}
+          </Space>
+        }
+        open={curvesOpen}
+        onCancel={closeCurves}
+        footer={null}
+        width={900}
+        destroyOnClose
+      >
+        {curvesData && curvesData.epochs?.length > 0 ? (
+          <Row gutter={[16, 16]}>
+            <Col span={12}>
+              <Plot
+                data={[
+                  { x: curvesData.epochs, y: curvesData.train_loss, type: 'scatter', mode: 'lines', name: 'Train Loss', line: { color: '#1890ff', width: 1.5 } },
+                  { x: curvesData.epochs, y: curvesData.valid_loss, type: 'scatter', mode: 'lines', name: 'Valid Loss', line: { color: '#ff4d4f', width: 1.5 } },
+                ]}
+                layout={{ title: { text: '损失曲线 (Loss)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: 'Epoch' } } }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </Col>
+            <Col span={12}>
+              <Plot
+                data={[
+                  { x: curvesData.epochs, y: curvesData.train_ic, type: 'scatter', mode: 'lines', name: 'Train IC', line: { color: '#52c41a', width: 1.5 } },
+                  { x: curvesData.epochs, y: curvesData.valid_ic, type: 'scatter', mode: 'lines', name: 'Valid IC', line: { color: '#faad14', width: 1.5 } },
+                ]}
+                layout={{ title: { text: 'IC 走势 (Information Coefficient)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: true, legend: { orientation: 'h', y: 1.15 }, xaxis: { title: { text: 'Epoch' } } }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </Col>
+            <Col span={12}>
+              <Plot
+                data={[
+                  { x: curvesData.epochs, y: curvesData.lr, type: 'scatter', mode: 'lines+markers', name: 'Learning Rate', line: { color: '#722ed1', width: 1.5 }, marker: { size: 4 } },
+                ]}
+                layout={{ title: { text: '学习率 (Learning Rate)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: 'Epoch' } } }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </Col>
+            <Col span={12}>
+              <Plot
+                data={[
+                  { x: curvesData.epochs, y: curvesData.grad_norm, type: 'scatter', mode: 'lines', name: 'Gradient Norm', line: { color: '#13c2c2', width: 1.5 }, fill: 'tozeroy', fillcolor: 'rgba(19,194,194,0.1)' },
+                ]}
+                layout={{ title: { text: '梯度范数 (Gradient Norm, L2)' }, height: 260, margin: { l: 55, r: 20, t: 40, b: 35 }, showlegend: false, xaxis: { title: { text: 'Epoch' } } }}
+                config={{ responsive: true, displayModeBar: false }}
+                style={{ width: '100%' }}
+              />
+            </Col>
+          </Row>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '40px 0', color: '#999' }}>
+            {curvesJob?.status === 'running' ? <LoadingOutlined spin style={{ fontSize: 24, marginBottom: 8 }} /> : null}
+            <div>{curvesJob?.status === 'running' ? '训练进行中，曲线实时更新中...' : '暂无训练曲线数据'}</div>
           </div>
         )}
       </Modal>

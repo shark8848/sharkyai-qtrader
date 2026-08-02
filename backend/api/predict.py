@@ -144,6 +144,56 @@ def _predict_single_stock(
 
     dataset = init_instance_by_config(dataset_config)
 
+    # Fill NaN features to avoid NaN propagation in neural network models.
+    # 注意: handler._data 和 handler._infer 可能都含 NaN（如 VWAP0 缺失），
+    # 且 prepare() 读取的是 _infer，因此必须 patch prepare() 的返回值。
+    import pandas as pd
+    import numpy as np
+
+    def _fill_df(df):
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            nan_count = int(df.isna().sum().sum())
+            if nan_count > 0:
+                return df.ffill().bfill().fillna(0)
+        return df
+
+    # 同时填充 handler 内部缓存（_data 和 _infer）
+    try:
+        for attr in ('_data', '_infer'):
+            internal = getattr(dataset.handler, attr, None)
+            if isinstance(internal, pd.DataFrame) and internal.isna().sum().sum() > 0:
+                setattr(dataset.handler, attr, internal.ffill().bfill().fillna(0))
+    except Exception:
+        pass
+
+    # Patch prepare() 确保返回的 DataFrame 无 NaN（兜底）
+    _original_prepare = dataset.prepare
+    def _patched_prepare(*args, **kwargs):
+        result = _original_prepare(*args, **kwargs)
+        if isinstance(result, list):
+            return [_fill_df(item) for item in result]
+        return _fill_df(result)
+    dataset.prepare = _patched_prepare
+
+    # Check for corrupted model weights (NaN in parameters)
+    try:
+        import torch
+        nn_module = None
+        for attr in ['model', 'lstm_model', 'rnn', 'net', 'transformer']:
+            obj = getattr(model, attr, None)
+            if obj is not None and hasattr(obj, 'named_parameters'):
+                nn_module = obj
+                break
+        if nn_module is not None:
+            nan_params = sum(1 for _, p in nn_module.named_parameters() if torch.isnan(p).any())
+            if nan_params > 0:
+                raise ValueError(
+                    f"模型 {model_id} 权重已损坏（{nan_params} 个参数含 NaN），"
+                    f"可能是训练数据含 NaN 导致。请重新训练或使用其他模型（如 XGBoost/LightGBM）。"
+                )
+    except ImportError:
+        pass
+
     # Generate predictions
     pred = model.predict(dataset, segment="test")
 

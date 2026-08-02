@@ -1,5 +1,6 @@
 """Training and backtest API routes."""
 
+import math
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, BackgroundTasks
@@ -11,6 +12,17 @@ from qtrader.backend.core.engine.evaluator import evaluator
 from qtrader.backend.core.engine.model_store import get_model_store
 
 router = APIRouter()
+
+
+def _clean_nan(obj):
+    """Recursively replace NaN/Inf with None for JSON compliance."""
+    if isinstance(obj, float):
+        return None if (math.isnan(obj) or math.isinf(obj)) else obj
+    if isinstance(obj, dict):
+        return {k: _clean_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_clean_nan(v) for v in obj]
+    return obj
 
 # ---------------------------------------------------------------------------
 # Training
@@ -62,8 +74,22 @@ async def get_training_status(job_id: str):
 
 @router.get("/train/jobs")
 async def list_training_jobs():
-    """List all training jobs."""
-    return [j.to_dict() for j in trainer.list_jobs()]
+    """List all training jobs (excluding train_history for brevity)."""
+    jobs = []
+    for j in trainer.list_jobs():
+        d = j.to_dict()
+        d.pop("train_history", None)  # 曲线数据由专用端点提供
+        jobs.append(d)
+    return _clean_nan(jobs)
+
+
+@router.get("/train/jobs/{job_id}/history")
+async def get_training_history(job_id: str):
+    """Get training curves (loss/IC per epoch) for a job."""
+    job = trainer.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _clean_nan(job.train_history)
 
 
 @router.delete("/train/jobs/{job_id}")
@@ -83,7 +109,7 @@ async def delete_training_job(job_id: str):
 async def list_models():
     """List all saved models with version info."""
     store = get_model_store()
-    return store.list_models()
+    return _clean_nan(store.list_models())
 
 
 @router.get("/models/{model_id}")
@@ -93,7 +119,7 @@ async def get_model_detail(model_id: str):
     meta = store.get_meta(model_id)
     if not meta:
         raise HTTPException(status_code=404, detail=f"Model {model_id} not found")
-    return meta
+    return _clean_nan(meta)
 
 
 @router.get("/models/by-job/{job_id}")

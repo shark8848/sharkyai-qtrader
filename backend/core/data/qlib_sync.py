@@ -2,6 +2,9 @@
 
 Fetches daily kline data from AKShare and converts it to qlib's
 proprietary binary format for use in model training and prediction.
+
+Design: incremental per-stock writing — each stock is written to disk
+immediately after fetch, so a restart never loses completed work.
 """
 
 import logging
@@ -15,6 +18,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from .checkpoint import SyncCheckpoint
+
 logger = logging.getLogger(__name__)
 
 QLIB_DATA_DIR = Path.home() / ".qlib" / "qlib_data" / "cn_data"
@@ -22,15 +27,8 @@ CALENDARS_DIR = QLIB_DATA_DIR / "calendars"
 FEATURES_DIR = QLIB_DATA_DIR / "features"
 INSTRUMENTS_DIR = QLIB_DATA_DIR / "instruments"
 
-# qlib .bin fields mapped from AKShare kline columns
-FIELD_MAP = {
-    "open": "$open",
-    "high": "$high",
-    "low": "$low",
-    "close": "$close",
-    "volume": "$volume",
-    "amount": "$amount",
-}
+# qlib .bin fields
+FIELDS = ["open", "high", "low", "close", "volume", "amount"]
 
 
 class QlibSyncTask:
@@ -42,18 +40,32 @@ class QlibSyncTask:
         self.message = ""
         self.total_stocks = 0
         self.done_stocks = 0
+        self.success_stocks = 0
+        self.skip_stocks = 0
         self.new_dates = 0
+        self.base_synced = 0  # disk count at sync start
         self.error: Optional[str] = None
         self.started_at: Optional[str] = None
         self.finished_at: Optional[str] = None
 
     def to_dict(self):
+        # overall = disk baseline + newly synced in this run
+        overall_synced = self.base_synced + self.success_stocks
+        # Use full market size as denominator for overall percentage
+        full_total = max(self.total_stocks + self.skip_stocks, self.total_stocks, 1)
+        overall_pct = round(overall_synced / full_total * 100, 1)
+        fail_stocks = max(0, self.done_stocks - self.success_stocks - self.skip_stocks)
         return {
             "status": self.status,
             "progress": round(self.progress, 1),
             "message": self.message,
             "total_stocks": self.total_stocks,
             "done_stocks": self.done_stocks,
+            "success_stocks": self.success_stocks,
+            "skip_stocks": self.skip_stocks,
+            "fail_stocks": fail_stocks,
+            "overall_synced": overall_synced,
+            "overall_pct": overall_pct,
             "new_dates": self.new_dates,
             "error": self.error,
             "started_at": self.started_at,
@@ -66,8 +78,33 @@ _sync_task = QlibSyncTask()
 _sync_lock = threading.Lock()
 
 
+def _count_disk_synced() -> int:
+    """Count stocks that have .bin data on disk."""
+    if not FEATURES_DIR.exists():
+        return 0
+    count = 0
+    for d in FEATURES_DIR.iterdir():
+        if d.is_dir() and (d / "close.day.bin").exists():
+            count += 1
+    return count
+
+
 def get_sync_status() -> dict:
-    return _sync_task.to_dict()
+    d = _sync_task.to_dict()
+    # When not running, report actual disk state
+    if _sync_task.status != "running":
+        disk_count = _count_disk_synced()
+        total = 5534  # full A-share market
+        d["overall_synced"] = disk_count
+        d["overall_pct"] = round(disk_count / total * 100, 1) if total > 0 else 0
+        d["total_stocks"] = total
+    # Add data time range from calendar
+    cal = _read_calendar()
+    if cal:
+        d["data_start"] = cal[0]
+        d["data_end"] = cal[-1]
+        d["data_days"] = len(cal)
+    return d
 
 
 def start_sync(market: str = "all") -> dict:
@@ -87,7 +124,12 @@ def start_sync(market: str = "all") -> dict:
 
 
 def _run_sync(market: str):
-    """Main sync logic (runs in background thread)."""
+    """Main sync logic (runs in background thread).
+
+    Key design: each stock is written to disk immediately after fetch.
+    Calendar is updated first so bin indices are stable.
+    On restart, already-synced stocks are automatically skipped.
+    """
     global _sync_task
     try:
         _sync_task.message = "正在获取股票列表..."
@@ -95,97 +137,98 @@ def _run_sync(market: str):
         if not instruments:
             raise ValueError(f"无法加载股票池 {market}")
 
-        _sync_task.total_stocks = len(instruments)
-        _sync_task.message = f"共 {len(instruments)} 只股票待同步"
-
         # Read existing calendar
         existing_cal = _read_calendar()
-        last_date = existing_cal[-1] if existing_cal else "1999-01-01"
-        first_date = existing_cal[0] if existing_cal else "1999-01-01"
         fetch_end = datetime.now().strftime("%Y%m%d")
-        # 对已有近期数据的股票做增量同步；对其余股票从日历起始日全量拉取
-        incremental_start = (pd.Timestamp(last_date) + timedelta(days=1)).strftime("%Y%m%d")
-        full_start = first_date.replace("-", "")
+        full_start = existing_cal[0].replace("-", "") if existing_cal else "19991110"
 
-        _sync_task.message = f"同步中 (增量: {incremental_start}起, 全量: {full_start}起)"
-        logger.info(f"Qlib sync: incremental={incremental_start}, full={full_start}, {len(instruments)} stocks")
+        # Step 1: Discover new trading dates by fetching a liquid stock (贵州茅台)
+        _sync_task.message = "正在获取最新交易日历..."
+        new_cal = _update_calendar(existing_cal, full_start, fetch_end)
+        _sync_task.new_dates = len(new_cal) - len(existing_cal)
+        cal_index = {d: i for i, d in enumerate(new_cal)}
+        logger.info(f"Calendar: {len(existing_cal)} -> {len(new_cal)} days (+{_sync_task.new_dates})")
 
-        # Fetch data and collect new calendar dates
-        all_new_dates = set()
+        # Step 2: Pre-filter — only keep stocks that actually need syncing
+        _sync_task.message = "正在检查哪些股票需要同步..."
+        pending = [s for s in instruments if not _stock_is_current(s, len(new_cal))]
+        already_done = len(instruments) - len(pending)
+        logger.info(f"Pre-filter: {len(pending)} need sync, {already_done} already current")
+
+        # Step 2b: Load checkpoint — skip stocks completed before restart
+        ckpt = SyncCheckpoint("daily")
+        ckpt_completed = ckpt.load()
+        if ckpt_completed:
+            before = len(pending)
+            pending = [s for s in pending if not ckpt.is_done(s)]
+            resumed = before - len(pending)
+            logger.info(f"Checkpoint resume: {resumed} stocks already done, {len(pending)} remaining")
+        else:
+            ckpt.start()
+
+        _sync_task.total_stocks = len(pending)
+        _sync_task.skip_stocks = len(instruments) - len(pending)
+        _sync_task.base_synced = _count_disk_synced()
+
+        if not pending:
+            ckpt.finish()
+            _sync_task.status = "done"
+            _sync_task.progress = 100
+            _sync_task.message = f"所有 {len(instruments)} 只股票均已是最新，无需同步"
+            _sync_task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            return
+
+        _sync_task.message = f"需同步 {len(pending)} 只 (已跳过 {len(instruments) - len(pending)} 只)"
+
+        # Step 3: Process only pending stocks — fetch and write immediately
+        last_cal_date = new_cal[-1] if new_cal else ""
         success_count = 0
         fail_count = 0
 
-        for i, symbol in enumerate(instruments):
-            # 判断该股票的 .bin 数据是否已覆盖近期（检查 close.day.bin 的数据量）
-            fname = symbol.lower()
-            feat_dir = FEATURES_DIR / fname
-            close_bin = feat_dir / "close.day.bin"
-            has_recent_data = False
-            if close_bin.exists():
-                raw = np.fromfile(str(close_bin), dtype="<f")
-                if len(raw) > 1:
-                    # 第一个元素是 calendar 起始索引，剩余是数据值
-                    data_len = len(raw) - 1
-                    start_idx = int(raw[0])
-                    # 如果数据覆盖到日历末尾附近，认为已是最新
-                    if start_idx + data_len >= len(existing_cal) - 5:
-                        has_recent_data = True
-            fetch_start = incremental_start if has_recent_data else full_start
-
+        for i, symbol in enumerate(pending):
             try:
-                df = _fetch_stock_kline(symbol, fetch_start, fetch_end)
+                df = _fetch_stock_kline(symbol, full_start, fetch_end)
                 if df is not None and not df.empty:
-                    dates = df["date"].tolist()
-                    all_new_dates.update(dates)
-                    # Store for later bin writing
-                    _write_stock_bin(symbol, df, existing_cal, all_new_dates)
+                    _write_stock_bins(symbol, df, cal_index)
                     success_count += 1
+                    _sync_task.success_stocks = success_count
+                    ckpt.mark_done(symbol)
                 else:
                     fail_count += 1
             except Exception as e:
                 fail_count += 1
-                if fail_count <= 5:
+                if fail_count <= 10:
                     logger.warning(f"Sync {symbol} failed: {e}")
 
-            # 请求间隔，避免被数据源限流
+            # Rate limit (only for actual network calls)
             time.sleep(0.5)
 
             _sync_task.done_stocks = i + 1
-            _sync_task.progress = (i + 1) / len(instruments) * 90  # reserve 10% for finalization
+            _sync_task.progress = (i + 1) / len(pending) * 100
             if (i + 1) % 10 == 0:
-                elapsed = (datetime.now() - datetime.strptime(_sync_task.started_at, "%Y-%m-%d %H:%M:%S")).total_seconds()
+                elapsed = (datetime.now() - datetime.strptime(
+                    _sync_task.started_at, "%Y-%m-%d %H:%M:%S")).total_seconds()
                 rate = (i + 1) / elapsed if elapsed > 0 else 1
-                remaining = (len(instruments) - i - 1) / rate / 60
+                remaining = (len(pending) - i - 1) / rate / 60
                 _sync_task.message = (
-                    f"已同步 {i+1}/{len(instruments)} "
-                    f"({success_count} 成功, {fail_count} 跳过) "
+                    f"已处理 {i+1}/{len(pending)} "
+                    f"({success_count} 成功, {fail_count} 失败) "
                     f"预计剩余 {remaining:.0f} 分钟"
                 )
 
-        # Finalize: update calendar and rewrite bins with proper calendar alignment
-        _sync_task.message = "正在更新交易日历和索引..."
-        _sync_task.progress = 92
-        new_cal = _finalize_calendar(existing_cal, all_new_dates)
-        _sync_task.new_dates = len(new_cal) - len(existing_cal)
-
-        # Rewrite all bins with updated calendar (needed for correct index offset)
-        _sync_task.message = "正在重写数据索引..."
-        _sync_task.progress = 95
-        _rewrite_all_bins(new_cal, instruments, fetch_start, fetch_end)
-
-        # Update instruments file
-        _sync_task.progress = 98
+        # Step 4: Update instruments file
         _update_instruments(instruments, new_cal)
 
+        total_skipped = len(instruments) - len(pending)
+        ckpt.finish()
         _sync_task.status = "done"
         _sync_task.progress = 100
         _sync_task.message = (
-            f"同步完成: {success_count} 只股票, "
-            f"新增 {_sync_task.new_dates} 个交易日, "
-            f"日历延伸至 {new_cal[-1] if new_cal else 'N/A'}"
+            f"同步完成: {success_count} 只写入, {total_skipped} 只已是最新, "
+            f"{fail_count} 只失败, 日历至 {last_cal_date}"
         )
         _sync_task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(f"Qlib sync done: {success_count} stocks, {len(new_cal)} calendar days")
+        logger.info(f"Qlib sync done: {success_count} written, {total_skipped} skipped, {fail_count} failed")
 
     except Exception as e:
         logger.exception("Qlib sync failed")
@@ -193,6 +236,119 @@ def _run_sync(market: str):
         _sync_task.error = str(e)
         _sync_task.message = f"同步失败: {e}"
         _sync_task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _stock_is_current(symbol: str, cal_len: int) -> bool:
+    """Check if a stock's .bin data already covers recent calendar dates."""
+    fname = symbol.lower()
+    close_bin = FEATURES_DIR / fname / "close.day.bin"
+    if not close_bin.exists():
+        return False
+    try:
+        raw = np.fromfile(str(close_bin), dtype="<f")
+        if len(raw) <= 1:
+            return False
+        data_len = len(raw) - 1
+        start_idx = int(raw[0])
+        # If data reaches within 5 days of calendar end, consider it current
+        return (start_idx + data_len) >= (cal_len - 5)
+    except Exception:
+        return False
+
+
+def _update_calendar(existing_cal: list[str], start: str, end: str) -> list[str]:
+    """Fetch trading calendar from a liquid stock and merge with existing."""
+    import akshare as ak
+
+    new_dates = set()
+    # Use 贵州茅台 (sh600519) as calendar reference — most liquid, never suspended
+    try:
+        df = ak.stock_zh_a_daily(symbol="sh600519", start_date=start, end_date=end, adjust="hfq")
+        if df is not None and not df.empty:
+            df = df.reset_index() if "date" not in df.columns else df
+            dates = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d").tolist()
+            new_dates.update(dates)
+    except Exception as e:
+        logger.warning(f"Calendar fetch from sh600519 failed: {e}")
+        # Try 平安银行 as fallback
+        try:
+            df = ak.stock_zh_a_daily(symbol="sz000001", start_date=start, end_date=end, adjust="hfq")
+            if df is not None and not df.empty:
+                df = df.reset_index() if "date" not in df.columns else df
+                dates = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d").tolist()
+                new_dates.update(dates)
+        except Exception:
+            pass
+
+    if not new_dates:
+        return existing_cal
+
+    # Merge and save
+    all_dates = sorted(set(existing_cal) | new_dates)
+    CALENDARS_DIR.mkdir(parents=True, exist_ok=True)
+    cal_file = CALENDARS_DIR / "day.txt"
+    with open(cal_file, "w") as f:
+        for d in all_dates:
+            f.write(d + "\n")
+    logger.info(f"Calendar updated: {len(all_dates)} days ({all_dates[0]} ~ {all_dates[-1]})")
+    return all_dates
+
+
+def _write_stock_bins(symbol: str, df: pd.DataFrame, cal_index: dict):
+    """Write .bin files for a single stock immediately to disk.
+
+    Merges new data with existing .bin content.
+    """
+    fname = symbol.lower()
+    feat_dir = FEATURES_DIR / fname
+    feat_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build a date->row lookup for new data
+    new_data = {}
+    for _, row in df.iterrows():
+        date_str = row["date"]
+        if date_str in cal_index:
+            new_data[date_str] = row
+
+    if not new_data:
+        return
+
+    calendar = sorted(cal_index.keys())
+
+    for field in FIELDS:
+        if field not in df.columns:
+            continue
+        bin_path = feat_dir / f"{field}.day.bin"
+
+        # Read existing bin data
+        existing_values = {}
+        if bin_path.exists():
+            raw = np.fromfile(str(bin_path), dtype="<f")
+            if len(raw) > 1:
+                start_idx = int(raw[0])
+                values = raw[1:]
+                for j, val in enumerate(values):
+                    idx = start_idx + j
+                    if idx < len(calendar):
+                        existing_values[calendar[idx]] = val
+
+        # Merge new data (overwrite existing with new)
+        for date_str, row in new_data.items():
+            val = row.get(field)
+            if val is not None and not pd.isna(val):
+                existing_values[date_str] = float(val)
+            elif date_str not in existing_values:
+                existing_values[date_str] = np.nan
+
+        if not existing_values:
+            continue
+
+        # Write bin: [start_calendar_index, val0, val1, ...]
+        sorted_dates = sorted(existing_values.keys())
+        first_idx = cal_index[sorted_dates[0]]
+        values = [existing_values[d] for d in sorted_dates]
+        arr = np.hstack([[first_idx], values]).astype("<f")
+        arr.tofile(str(bin_path))
 
 
 def _load_instruments(market: str) -> list[str]:
@@ -206,7 +362,6 @@ def _load_instruments(market: str) -> list[str]:
 
     inst_file = INSTRUMENTS_DIR / f"{market}.txt"
     if not inst_file.exists():
-        # Fallback to full market
         return _fetch_all_stock_symbols()
     symbols = []
     with open(inst_file) as f:
@@ -223,7 +378,6 @@ def _fetch_all_stock_symbols() -> list[str]:
 
     try:
         df = ak.stock_info_a_code_name()
-        # df columns: code, name
         symbols = []
         for code in df["code"].astype(str):
             code = code.strip()
@@ -282,7 +436,7 @@ def _fetch_stock_kline(symbol: str, start: str, end: str, max_retries: int = 3) 
     if df is None or df.empty:
         return None
 
-    # stock_zh_a_daily returns English columns: date, open, high, low, close, volume, amount
+    # stock_zh_a_daily returns: date, open, high, low, close, volume, amount
     df = df.reset_index() if "date" not in df.columns else df
     needed = ["date", "open", "high", "low", "close", "volume"]
     available = [c for c in needed if c in df.columns]
@@ -295,77 +449,6 @@ def _fetch_stock_kline(symbol: str, start: str, end: str, max_retries: int = 3) 
     return df
 
 
-def _write_stock_bin(symbol: str, df: pd.DataFrame, calendar: list[str], all_dates: set):
-    """Temporary storage during sync - actual bin writing happens in finalize."""
-    # Store fetched data in memory for the finalize step
-    if not hasattr(_run_sync, "_stock_data"):
-        _run_sync._stock_data = {}
-    _run_sync._stock_data[symbol] = df
-
-
-def _finalize_calendar(existing: list[str], new_dates: set) -> list[str]:
-    """Merge new dates into calendar and save."""
-    all_dates = sorted(set(existing) | new_dates)
-    CALENDARS_DIR.mkdir(parents=True, exist_ok=True)
-    cal_file = CALENDARS_DIR / "day.txt"
-    with open(cal_file, "w") as f:
-        for d in all_dates:
-            f.write(d + "\n")
-    return all_dates
-
-
-def _rewrite_all_bins(calendar: list[str], instruments: list[str], fetch_start: str, fetch_end: str):
-    """Rewrite .bin files for stocks that have new data."""
-    stock_data = getattr(_run_sync, "_stock_data", {})
-    if not stock_data:
-        return
-
-    cal_index = {d: i for i, d in enumerate(calendar)}
-    fields = ["open", "high", "low", "close", "volume", "amount"]
-
-    for symbol, df in stock_data.items():
-        # Convert symbol to qlib fname format (sh600519)
-        fname = symbol.lower()
-        feat_dir = FEATURES_DIR / fname
-        feat_dir.mkdir(parents=True, exist_ok=True)
-
-        for field in fields:
-            if field not in df.columns:
-                continue
-            bin_path = feat_dir / f"{field}.day.bin"
-
-            # Read existing bin data if present
-            existing_data = {}
-            if bin_path.exists():
-                raw = np.fromfile(str(bin_path), dtype="<f")
-                if len(raw) > 1:
-                    start_idx = int(raw[0])
-                    values = raw[1:]
-                    for j, val in enumerate(values):
-                        idx = start_idx + j
-                        if idx < len(calendar):
-                            existing_data[calendar[idx]] = val
-
-            # Merge new data
-            for _, row in df.iterrows():
-                date_str = row["date"]
-                if date_str in cal_index:
-                    existing_data[date_str] = float(row[field]) if not pd.isna(row[field]) else np.nan
-
-            if not existing_data:
-                continue
-
-            # Write bin: [start_index, val0, val1, ...]
-            sorted_dates = sorted(existing_data.keys())
-            first_idx = cal_index[sorted_dates[0]]
-            values = [existing_data[d] for d in sorted_dates]
-            arr = np.hstack([[first_idx], values]).astype("<f")
-            arr.tofile(str(bin_path))
-
-    # Clear stored data
-    _run_sync._stock_data = {}
-
-
 def _update_instruments(instruments: list[str], calendar: list[str]):
     """Update instruments file with extended end dates."""
     if not calendar:
@@ -374,7 +457,6 @@ def _update_instruments(instruments: list[str], calendar: list[str]):
     start_date = calendar[0]
 
     INSTRUMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    # Update all.txt
     all_file = INSTRUMENTS_DIR / "all.txt"
     with open(all_file, "w") as f:
         for sym in instruments:

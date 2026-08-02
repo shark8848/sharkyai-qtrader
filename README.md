@@ -11,7 +11,9 @@
 ### 功能特性
 
 - **多数据源**：AKShare / Qlib 统一抽象，运行时热切换，SQLite 增量缓存
-- **AI 训练引擎**：桥接 Qlib 生态，支持 LightGBM / XGBoost / CatBoost / Linear 四种模型
+- **分钟级数据**：1/5/15/30/60 分钟 K 线同步与查询，APScheduler 收盘自动同步
+- **AI 训练引擎**：桥接 Qlib 生态，支持 14 种模型（LightGBM / XGBoost / CatBoost / Linear / GRU / LSTM / ALSTM / Transformer / TCN / TabNet / DNN / GATs / SFM / DoubleEnsemble）
+- **单股预测**：加载已训练模型，对单只股票生成预测评分 + 多空信号 + 强度分析
 - **模型版本管理**：训练模型自动持久化，版本号递增，支持按任务查询与下载
 - **回测引擎**：TopkDropout 策略 + 评估器（Sharpe、最大回撤、Calmar、信息比率）+ Plotly 图表 + 多策略对比
 - **交易模块**：SimBroker 内存撮合（T+1）+ 东方财富 jvQuant API 接口
@@ -19,6 +21,8 @@
 - **策略引擎**：信号 → 风控过滤 → 下单执行 + 定时调仓 + 运行日志
 - **任务持久化**：训练/回测任务支持 SQLite（默认）或 PostgreSQL 后端
 - **实时进度**：训练进度百分比 + 日志时间线 + WebSocket 推送
+- **本地 K 线读取**：直接读取 Qlib .bin 文件，无需网络请求
+- **同步断点续传**：checkpoint 机制保证中断后精确恢复，避免重复拉取
 - **服务管理**：`qtrader.sh` 一键启停脚本（start / stop / restart / status / logs）
 
 ### 技术栈
@@ -28,7 +32,7 @@
 | 后端 | FastAPI + Pydantic v2 + Uvicorn |
 | 前端 | React 18 + TypeScript + Vite 6 + Ant Design 5 + Zustand |
 | 可视化 | Plotly + Lightweight Charts |
-| AI/ML | Qlib + LightGBM + XGBoost + CatBoost |
+| AI/ML | Qlib + LightGBM + XGBoost + CatBoost + PyTorch (GRU/LSTM/Transformer/TCN/GATs) |
 | 存储 | SQLite / PostgreSQL（任务）+ 文件系统（模型） |
 
 ### 快速开始
@@ -63,9 +67,9 @@ cd frontend && npm install && cd ..
 ```
 qtrader/
 ├── backend/
-│   ├── api/            # FastAPI 路由 (data / training / trading / ws)
+│   ├── api/            # FastAPI 路由 (data / training / trading / predict / ws)
 │   ├── core/
-│   │   ├── data/       # 多数据源抽象 + 缓存
+│   │   ├── data/       # 多数据源抽象 + 缓存 + 分钟级同步
 │   │   ├── engine/     # 训练器 / 回测 / 评估 / 模型存储 / 任务存储
 │   │   └── trading/    # 券商 / 风控 / 订单 / 策略
 │   ├── config.py       # 全局配置 (环境变量 QTRADER_* / .env)
@@ -84,6 +88,12 @@ qtrader/
 - `POST /switch` — 切换数据源
 - `GET /stocks` — 获取股票列表
 - `GET /kline` — 获取 K 线数据
+- `POST /sync_minute` — 同步分钟级 K 线数据
+- `GET /sync_minute/status` — 分钟同步进度
+- `GET /minute/calendar` — 有分钟数据的日期列表
+- `GET /minute/{symbol}` — 获取某股某日分钟 K 线
+- `GET /minute_stocks/{date}` — 获取某日有分钟数据的股票
+- `GET /local_kline/{symbol}` — 读取本地 .bin 日 K 线
 
 **训练** `/api/train`
 - `GET /config` — 获取默认训练配置（可用模型/因子/市场）
@@ -122,6 +132,10 @@ qtrader/
 - `PUT /config` — 更新风控配置
 - `GET /stats` — 风控日统计
 
+**预测** `/api/predict`
+- `GET /data_range` — 获取可用数据日期范围
+- `POST /run` — 单股预测（返回评分序列 + 多空信号 + 强度）
+
 **WebSocket**：`ws://localhost:8000/ws` — 实时推送（quotes / orders / training / position 频道）
 
 ### 风控参数
@@ -156,7 +170,9 @@ A full-stack quantitative trading platform built on the [Qlib](https://github.co
 ### Features
 
 - **Multi-Source Data**: Unified AKShare / Qlib abstraction with runtime hot-switching and SQLite incremental caching
-- **AI Training Engine**: Bridges the Qlib ecosystem — supports LightGBM, XGBoost, CatBoost, and Linear models
+- **Minute-Level Data**: 1/5/15/30/60-min K-line sync & query, APScheduler auto-sync after market close
+- **AI Training Engine**: Bridges the Qlib ecosystem — supports 14 models (LightGBM / XGBoost / CatBoost / Linear / GRU / LSTM / ALSTM / Transformer / TCN / TabNet / DNN / GATs / SFM / DoubleEnsemble)
+- **Single-Stock Prediction**: Load trained models to generate prediction scores + bullish/bearish signal + strength analysis
 - **Model Versioning**: Trained models auto-persisted with incremental versioning, queryable by job and downloadable
 - **Backtesting Engine**: TopkDropout strategy + evaluator (Sharpe, max drawdown, Calmar, IR) with Plotly charts + multi-strategy comparison
 - **Trading Module**: SimBroker in-memory matching (T+1) + EastMoney jvQuant API integration
@@ -164,6 +180,8 @@ A full-stack quantitative trading platform built on the [Qlib](https://github.co
 - **Strategy Engine**: Signal → risk filter → order execution with scheduled rebalancing + runtime logs
 - **Job Persistence**: Training/backtest jobs stored in SQLite (default) or PostgreSQL
 - **Real-Time Progress**: Training progress percentage + log timeline + WebSocket push
+- **Local K-line Reader**: Read Qlib .bin files directly without network requests
+- **Sync Checkpoint**: Resume from exact interruption point, avoiding duplicate fetches
 - **Service Management**: One-command `qtrader.sh` script (start / stop / restart / status / logs)
 
 ### Tech Stack
@@ -173,7 +191,7 @@ A full-stack quantitative trading platform built on the [Qlib](https://github.co
 | Backend | FastAPI + Pydantic v2 + Uvicorn |
 | Frontend | React 18 + TypeScript + Vite 6 + Ant Design 5 + Zustand |
 | Visualization | Plotly + Lightweight Charts |
-| AI/ML | Qlib + LightGBM + XGBoost + CatBoost |
+| AI/ML | Qlib + LightGBM + XGBoost + CatBoost + PyTorch (GRU/LSTM/Transformer/TCN/GATs) |
 | Storage | SQLite / PostgreSQL (jobs) + File system (models) |
 
 ### Quick Start
@@ -204,9 +222,9 @@ Custom ports: `QTRADER_PORT=9000 QTRADER_FE_PORT=3000 ./qtrader.sh start`
 ```
 qtrader/
 ├── backend/
-│   ├── api/            # FastAPI routes (data / training / trading / ws)
+│   ├── api/            # FastAPI routes (data / training / trading / predict / ws)
 │   ├── core/
-│   │   ├── data/       # Multi-source abstraction + caching
+│   │   ├── data/       # Multi-source abstraction + caching + minute sync
 │   │   ├── engine/     # Trainer / backtest / evaluator / model store / job store
 │   │   └── trading/    # Broker / risk / order / strategy
 │   ├── config.py       # Global config (env QTRADER_* / .env)
@@ -225,6 +243,12 @@ qtrader/
 - `POST /switch` — Switch active data source
 - `GET /stocks` — Get stock list
 - `GET /kline` — Get K-line data
+- `POST /sync_minute` — Sync minute-level K-line data
+- `GET /sync_minute/status` — Minute sync progress
+- `GET /minute/calendar` — Dates with minute data
+- `GET /minute/{symbol}` — Get minute K-line for a stock on a date
+- `GET /minute_stocks/{date}` — Stocks with minute data on a date
+- `GET /local_kline/{symbol}` — Read local .bin daily K-line
 
 **Training** `/api/train`
 - `GET /config` — Get default training config (available models/handlers/markets)
@@ -262,6 +286,10 @@ qtrader/
 - `GET /config` — Get risk config
 - `PUT /config` — Update risk config
 - `GET /stats` — Daily risk statistics
+
+**Prediction** `/api/predict`
+- `GET /data_range` — Get available data date range
+- `POST /run` — Single-stock prediction (score series + signal + strength)
 
 **WebSocket**: `ws://localhost:8000/ws` — Real-time push (quotes / orders / training / position channels)
 

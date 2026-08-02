@@ -6,6 +6,14 @@ from fastapi import APIRouter, Query
 
 from qtrader.backend.core.data.manager import data_manager
 from qtrader.backend.core.data.qlib_sync import start_sync, get_sync_status
+from qtrader.backend.core.data.local_reader import read_local_kline, read_raw_kline
+from qtrader.backend.core.data.minute_sync import (
+    start_minute_sync,
+    get_minute_sync_status,
+    get_minute_data,
+    get_minute_calendar,
+    get_minute_stocks_for_date,
+)
 
 router = APIRouter()
 
@@ -90,3 +98,79 @@ async def sync_qlib(market: str = Query("all", description="Stock pool to sync")
 async def sync_qlib_status():
     """Get the current sync task progress."""
     return get_sync_status()
+
+
+# === Minute-level data endpoints ===
+
+
+@router.post("/sync_minute")
+async def sync_minute(
+    market: str = Query("all", description="Stock pool"),
+    period: str = Query("1", description="Kline period in minutes: 1/5/15/30/60"),
+):
+    """Start background task: sync minute-level kline data."""
+    result = start_minute_sync(market, period)
+    return result
+
+
+@router.get("/sync_minute/status")
+async def sync_minute_status():
+    """Get minute sync task progress."""
+    return get_minute_sync_status()
+
+
+@router.get("/minute/calendar")
+async def minute_calendar():
+    """Get list of dates that have minute data."""
+    dates = get_minute_calendar()
+    return {"dates": dates, "total": len(dates)}
+
+
+@router.get("/minute/{symbol}")
+async def minute_kline(
+    symbol: str,
+    date: str = Query(..., description="Date YYYY-MM-DD"),
+):
+    """Get minute kline data for a stock on a specific date."""
+    df = get_minute_data(symbol, date)
+    if df is None:
+        return {"symbol": symbol, "date": date, "rows": 0, "data": []}
+    # Convert datetime to string for JSON
+    df = df.copy()
+    if "datetime" in df.columns:
+        df["datetime"] = df["datetime"].astype(str)
+    return {
+        "symbol": symbol,
+        "date": date,
+        "rows": len(df),
+        "data": df.to_dict(orient="records"),
+    }
+
+
+@router.get("/minute_stocks/{date}")
+async def minute_stocks(date: str):
+    """Get list of stocks with minute data for a given date."""
+    stocks = get_minute_stocks_for_date(date)
+    return {"date": date, "stocks": stocks, "total": len(stocks)}
+
+
+@router.get("/local_kline/{symbol}")
+async def local_kline(symbol: str, days: int = Query(120, ge=1, le=5000)):
+    """Read daily kline from local .bin files (no network)."""
+    df = read_local_kline(symbol, days)
+    return {
+        "symbol": symbol,
+        "rows": len(df),
+        "data": df.to_dict(orient="records") if not df.empty else [],
+    }
+
+
+@router.get("/raw_kline/{symbol}")
+async def raw_kline(symbol: str, days: int = Query(120, ge=1, le=5000)):
+    """Fetch unadjusted daily kline from akshare (sina, cached 1h)."""
+    df = read_raw_kline(symbol, days)
+    return {
+        "symbol": symbol,
+        "rows": len(df),
+        "data": df.to_dict(orient="records") if not df.empty else [],
+    }

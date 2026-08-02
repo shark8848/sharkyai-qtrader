@@ -19,8 +19,27 @@ async def lifespan(app: FastAPI):
     # Startup
     from qtrader.backend.core.data.manager import data_manager
     await data_manager.initialize()
+
+    # Start scheduled minute-data sync (every trading day at 15:30)
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from qtrader.backend.core.data.minute_sync import start_minute_sync
+
+    scheduler = BackgroundScheduler()
+
+    def _scheduled_minute_sync():
+        """Auto sync minute data after market close."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Scheduled minute sync triggered")
+        start_minute_sync(market="all", period="1")
+
+    # Run at 15:30 Mon-Fri
+    scheduler.add_job(_scheduled_minute_sync, "cron", day_of_week="mon-fri", hour=15, minute=30)
+    scheduler.start()
+
     yield
     # Shutdown
+    scheduler.shutdown()
     await data_manager.shutdown()
 
 

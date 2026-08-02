@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react'
-import { Card, Select, Table, Input, Button, Space, Tag, message, Progress, Alert } from 'antd'
-import { SyncOutlined, SearchOutlined, CloudSyncOutlined } from '@ant-design/icons'
+import { Card, Select, Button, Space, Tag, message, Progress } from 'antd'
+import { SyncOutlined, CloudSyncOutlined, LineChartOutlined } from '@ant-design/icons'
 import axios from 'axios'
+import StockChart from '../components/StockChart'
 
 interface DataSource {
   id: string
@@ -9,54 +10,27 @@ interface DataSource {
   active: boolean
 }
 
-interface StockItem {
-  symbol: string
-  name: string
-  market: string
-  industry: string
-}
-
 export default function DataManager() {
   const [sources, setSources] = useState<DataSource[]>([])
   const [activeSource, setActiveSource] = useState('')
-  const [stocks, setStocks] = useState<StockItem[]>([])
-  const [total, setTotal] = useState(0)
-  const [keyword, setKeyword] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [pagination, setPagination] = useState({ current: 1, pageSize: 20 })
 
   // Qlib 同步状态
   const [syncStatus, setSyncStatus] = useState<any>(null)
   const syncPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
+  // 分钟数据同步状态
+  const [minSyncStatus, setMinSyncStatus] = useState<any>(null)
+  const minSyncPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   useEffect(() => {
     fetchSources()
   }, [])
-
-  useEffect(() => {
-    if (activeSource) fetchStocks()
-  }, [activeSource])
 
   const fetchSources = async () => {
     const res = await axios.get('/api/data/sources')
     setSources(res.data)
     const active = res.data.find((s: DataSource) => s.active)
     if (active) setActiveSource(active.id)
-  }
-
-  const fetchStocks = async () => {
-    setLoading(true)
-    setPagination(prev => ({ ...prev, current: 1 }))
-    try {
-      const params: any = {}
-      if (keyword) params.keyword = keyword
-      const res = await axios.get('/api/data/stocks', { params })
-      setStocks(res.data.data)
-      setTotal(res.data.total)
-    } catch {
-      message.error('获取股票列表失败')
-    }
-    setLoading(false)
   }
 
   const switchSource = async (sourceId: string) => {
@@ -95,11 +69,59 @@ export default function DataManager() {
     } catch { /* ignore */ }
   }
 
-  // 页面加载时检查是否有正在运行的同步
+  // 页面加载时检查是否有正在运行的同步，自动启动轮询
   useEffect(() => {
-    pollSyncStatus()
-    return () => { if (syncPollRef.current) clearInterval(syncPollRef.current) }
+    const initPoll = async () => {
+      try {
+        const res = await axios.get('/api/data/sync_qlib/status')
+        setSyncStatus(res.data)
+        if (res.data.status === 'running' && !syncPollRef.current) {
+          syncPollRef.current = setInterval(pollSyncStatus, 2000)
+        }
+      } catch { /* ignore */ }
+      try {
+        const res2 = await axios.get('/api/data/sync_minute/status')
+        setMinSyncStatus(res2.data)
+        if (res2.data.status === 'running' && !minSyncPollRef.current) {
+          minSyncPollRef.current = setInterval(pollMinSyncStatus, 2000)
+        }
+      } catch { /* ignore */ }
+    }
+    initPoll()
+    return () => {
+      if (syncPollRef.current) clearInterval(syncPollRef.current)
+      if (minSyncPollRef.current) clearInterval(minSyncPollRef.current)
+    }
   }, [])
+
+  // === 分钟数据同步 ===
+  const startMinuteSync = async () => {
+    try {
+      const res = await axios.post('/api/data/sync_minute', null, { params: { market: 'all', period: '1' } })
+      if (res.data.error) {
+        message.warning(res.data.error)
+        return
+      }
+      message.info('分钟数据同步已启动')
+      minSyncPollRef.current = setInterval(pollMinSyncStatus, 2000)
+      pollMinSyncStatus()
+    } catch {
+      message.error('启动分钟同步失败')
+    }
+  }
+
+  const pollMinSyncStatus = async () => {
+    try {
+      const res = await axios.get('/api/data/sync_minute/status')
+      setMinSyncStatus(res.data)
+      if (res.data.status === 'done' || res.data.status === 'error') {
+        if (minSyncPollRef.current) clearInterval(minSyncPollRef.current)
+        minSyncPollRef.current = null
+        if (res.data.status === 'done') message.success(res.data.message)
+        else if (res.data.status === 'error') message.error(res.data.message)
+      }
+    } catch { /* ignore */ }
+  }
 
   return (
     <div>
@@ -115,67 +137,91 @@ export default function DataManager() {
             options={sources.map(s => ({ value: s.id, label: `${s.name} ${s.active ? '(当前)' : ''}` }))}
           />
           <Button icon={<SyncOutlined />} onClick={fetchSources}>刷新</Button>
+        </Space>
+      </Card>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        <Card title="日线数据同步" extra={<Tag color="blue">Qlib .bin</Tag>}>
+          <p style={{ fontSize: 13, color: '#888', margin: '0 0 4px' }}>
+            全市场日K线 → Qlib 二进制格式，用于模型训练与预测
+          </p>
+          {syncStatus?.data_start && (
+            <p style={{ fontSize: 12, color: '#aaa', margin: '0 0 12px' }}>
+              数据范围：{syncStatus.data_start} ~ {syncStatus.data_end}（{syncStatus.data_days} 个交易日）
+            </p>
+          )}
           <Button
             type="primary"
             icon={<CloudSyncOutlined spin={syncStatus?.status === 'running'} />}
             onClick={startQlibSync}
             loading={syncStatus?.status === 'running'}
+            block
           >
-            同步到 Qlib
+            同步日线数据
           </Button>
-        </Space>
-        {syncStatus && syncStatus.status !== 'idle' && (
-          <div style={{ marginTop: 12 }}>
-            <Progress
-              percent={syncStatus.progress}
-              status={syncStatus.status === 'error' ? 'exception' : syncStatus.status === 'done' ? 'success' : 'active'}
-              size="small"
-            />
-            <div style={{ fontSize: 12, color: '#666', marginTop: 4 }}>
-              {syncStatus.message}
-              {syncStatus.status === 'running' && ` (${syncStatus.done_stocks}/${syncStatus.total_stocks})`}
+          {syncStatus && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                <span style={{ fontWeight: 500 }}>已同步 {syncStatus.overall_synced}/{(syncStatus.total_stocks || 0) + (syncStatus.skip_stocks || 0)} 只</span>
+                <span style={{ color: '#1677ff' }}>{syncStatus.overall_pct}%</span>
+              </div>
+              <Progress
+                percent={syncStatus.overall_pct}
+                status={syncStatus.status === 'error' ? 'exception' : syncStatus.status === 'done' ? 'success' : syncStatus.status === 'running' ? 'active' : 'normal'}
+                size="small"
+                showInfo={false}
+              />
+              {syncStatus.status !== 'idle' && (
+                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+                  新增 <b style={{ color: '#52c41a' }}>{syncStatus.success_stocks}</b> | 失败 {syncStatus.fail_stocks || 0}
+                </div>
+              )}
             </div>
-          </div>
-        )}
-      </Card>
+          )}
+        </Card>
 
-      <Card title={`股票列表 (共 ${total} 只)`}>
-        <Space style={{ marginBottom: 16 }}>
-          <Input
-            placeholder="搜索代码或名称"
-            prefix={<SearchOutlined />}
-            value={keyword}
-            onChange={e => setKeyword(e.target.value)}
-            onPressEnter={fetchStocks}
-            style={{ width: 300 }}
-            allowClear
-          />
-          <Button type="primary" onClick={fetchStocks}>搜索</Button>
-        </Space>
-        <Table
-          dataSource={stocks}
-          rowKey="symbol"
-          loading={loading}
-          columns={[
-            { title: '代码', dataIndex: 'symbol', key: 'symbol' },
-            { title: '名称', dataIndex: 'name', key: 'name' },
-            {
-              title: '市场', dataIndex: 'market', key: 'market',
-              render: (v: string) => <Tag color={v === 'SH' ? 'red' : 'blue'}>{v}</Tag>,
-            },
-            { title: '行业', dataIndex: 'industry', key: 'industry' },
-          ]}
-          pagination={{
-            current: pagination.current,
-            pageSize: pagination.pageSize,
-            total: total,
-            showSizeChanger: true,
-            pageSizeOptions: ['10', '20', '50', '100'],
-            showTotal: (t) => `共 ${t} 条`,
-            onChange: (page, size) => setPagination({ current: page, pageSize: size }),
-          }}
-          size="small"
-        />
+        <Card title="分钟数据同步" extra={<Tag color="blue">Parquet</Tag>}>
+          <p style={{ fontSize: 13, color: '#888', margin: '0 0 4px' }}>
+            1分钟K线 → Parquet 存储，用于分时浏览与日内因子
+          </p>
+          {minSyncStatus?.data_start && (
+            <p style={{ fontSize: 12, color: '#aaa', margin: '0 0 12px' }}>
+              数据范围：{minSyncStatus.data_start} ~ {minSyncStatus.data_end}（{minSyncStatus.data_days} 个交易日）
+            </p>
+          )}
+          <Button
+            type="primary"
+            icon={<LineChartOutlined spin={minSyncStatus?.status === 'running'} />}
+            onClick={startMinuteSync}
+            loading={minSyncStatus?.status === 'running'}
+            block
+          >
+            同步分钟数据
+          </Button>
+          {minSyncStatus && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                <span style={{ fontWeight: 500 }}>已同步 {minSyncStatus.overall_synced}/{(minSyncStatus.total_stocks || 0) + (minSyncStatus.skip_stocks || 0)} 只</span>
+                <span style={{ color: '#1677ff' }}>{minSyncStatus.overall_pct}%</span>
+              </div>
+              <Progress
+                percent={minSyncStatus.overall_pct}
+                status={minSyncStatus.status === 'error' ? 'exception' : minSyncStatus.status === 'done' ? 'success' : minSyncStatus.status === 'running' ? 'active' : 'normal'}
+                size="small"
+                showInfo={false}
+              />
+              {minSyncStatus.status !== 'idle' && (
+                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
+                  新增 <b style={{ color: '#52c41a' }}>{minSyncStatus.success_stocks}</b> | 失败 {minSyncStatus.fail_stocks || 0}
+                </div>
+              )}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <Card title="行情图表">
+        <StockChart />
       </Card>
     </div>
   )

@@ -9,3 +9,4 @@ websockets>=11.0
 xgboost>=2.0.0
 catboost>=1.2.0
 torch>=2.0.0
+apscheduler>=3.10

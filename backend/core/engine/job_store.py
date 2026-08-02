@@ -72,9 +72,15 @@ class SQLiteJobStore(JobStore):
                     progress    INTEGER NOT NULL DEFAULT 0,
                     current_step TEXT NOT NULL DEFAULT '',
                     logs        TEXT NOT NULL DEFAULT '[]',
-                    model_path  TEXT
+                    model_path  TEXT,
+                    train_history TEXT
                 )
             """)
+            # 兼容旧表：添加 train_history 列
+            try:
+                conn.execute("ALTER TABLE train_jobs ADD COLUMN train_history TEXT")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
             conn.commit()
             conn.close()
         logger.info(f"SQLiteJobStore initialized: {self._db_path}")
@@ -88,8 +94,8 @@ class SQLiteJobStore(JobStore):
             conn.execute("""
                 INSERT OR REPLACE INTO train_jobs
                     (job_id, status, config, created_at, finished_at, error,
-                     metrics, progress, current_step, logs, model_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     metrics, progress, current_step, logs, model_path, train_history)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data["job_id"],
                 data["status"],
@@ -102,6 +108,7 @@ class SQLiteJobStore(JobStore):
                 data.get("current_step", ""),
                 json.dumps(data.get("logs", []), ensure_ascii=False),
                 data.get("model_path"),
+                json.dumps(data.get("train_history"), ensure_ascii=False) if data.get("train_history") else None,
             ))
             conn.commit()
             conn.close()
@@ -139,7 +146,7 @@ class SQLiteJobStore(JobStore):
     def _row_to_dict(row) -> dict:
         d = dict(row)
         # JSON 字段反序列化
-        for key in ("config", "metrics", "logs"):
+        for key in ("config", "metrics", "logs", "train_history"):
             if d.get(key) and isinstance(d[key], str):
                 try:
                     d[key] = json.loads(d[key])
