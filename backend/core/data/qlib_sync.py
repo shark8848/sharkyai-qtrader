@@ -284,6 +284,18 @@ def _update_calendar(existing_cal: list[str], start: str, end: str) -> list[str]
 
     # Merge and save
     all_dates = sorted(set(existing_cal) | new_dates)
+    # Strip future dates: calendar must never extend beyond today.
+    # Without this, any future date ever written (by scripts or bad data)
+    # would be preserved forever by the union merge, inflating the
+    # "needs sync" list in _stock_is_current.
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    future_dates = [d for d in all_dates if d > today_str]
+    if future_dates:
+        all_dates = [d for d in all_dates if d <= today_str]
+        logger.warning(
+            f"Calendar: stripped {len(future_dates)} future dates "
+            f"({future_dates[0]} ~ {future_dates[-1]}), calendar now ends at {all_dates[-1] if all_dates else 'N/A'}"
+        )
     CALENDARS_DIR.mkdir(parents=True, exist_ok=True)
     cal_file = CALENDARS_DIR / "day.txt"
     with open(cal_file, "w") as f:
