@@ -292,7 +292,10 @@ MODEL_REGISTRY: dict[str, dict] = {
         },
     },
     "SFM_Model": {
-        "class": "SFM_Model",
+        # qlib 的 pytorch_sfm 中 SFM_Model 是内部 SFM cell(nn.Module)，仅接受
+        # (d_feat, output_dim, freq_dim, hidden_size, dropout_W, dropout_U, device)
+        # 真正的 qlib 模型类是 SFM(Model)，接受 n_epochs/lr/batch_size/early_stop 等参数
+        "class": "SFM",
         "module_path": "qlib.contrib.model.pytorch_sfm",
         "default_kwargs": {
             "d_feat": 158,
