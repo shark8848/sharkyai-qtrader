@@ -26,7 +26,7 @@ export default function StockChart() {
   const [days, setDays] = useState(120)
   const [adjust, setAdjust] = useState<'hfq' | 'none'>('hfq')
   const [date, setDate] = useState('')
-  const [dates, setDates] = useState<string[]>([])
+  const [dates, setDates] = useState<{ date: string; count: number }[]>([])
   const [loading, setLoading] = useState(false)
   const [hasData, setHasData] = useState(true)
   const [stockOptions, setStockOptions] = useState<{ value: string; label: string }[]>([])
@@ -41,12 +41,12 @@ export default function StockChart() {
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const predictSeriesRef = useRef<ISeriesApi<'Line'> | null>(null)
 
-  // Load minute dates
+  // Load minute dates (only dates with sufficient coverage, showing stock counts)
   useEffect(() => {
-    axios.get('/api/data/minute/calendar').then(res => {
-      const d = res.data.dates || []
-      setDates(d)
-      if (d.length > 0) setDate(d[d.length - 1])
+    axios.get('/api/data/minute/calendar', { params: { min_stocks: 100 } }).then(res => {
+      const entries = res.data.entries || []
+      setDates(entries)
+      if (entries.length > 0) setDate(entries[entries.length - 1].date)
     }).catch(() => {})
   }, [])
 
@@ -299,9 +299,9 @@ export default function StockChart() {
           <Select
             value={date}
             onChange={setDate}
-            style={{ width: 130 }}
+            style={{ width: 190 }}
             size="small"
-            options={dates.map(d => ({ value: d, label: d }))}
+            options={dates.map(d => ({ value: d.date, label: `${d.date} (${d.count}只)` }))}
           />
         )}
         {period === 'minute' && (

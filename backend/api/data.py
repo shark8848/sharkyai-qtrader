@@ -12,6 +12,7 @@ from qtrader.backend.core.data.minute_sync import (
     get_minute_sync_status,
     get_minute_data,
     get_minute_calendar,
+    get_minute_calendar_with_counts,
     get_minute_stocks_for_date,
 )
 from qtrader.backend.core.data.minute_to_qlib import (
@@ -124,10 +125,17 @@ async def sync_minute_status():
 
 
 @router.get("/minute/calendar")
-async def minute_calendar():
-    """Get list of dates that have minute data."""
-    dates = get_minute_calendar()
-    return {"dates": dates, "total": len(dates)}
+async def minute_calendar(min_stocks: int = Query(0, ge=0)):
+    """Get dates that have minute data, with per-date stock counts.
+
+    min_stocks>0 filters out dates with insufficient coverage (e.g. dates
+    created by single-stock test syncs that only contain 1~2 files).
+    """
+    entries = get_minute_calendar_with_counts()
+    if min_stocks > 0:
+        entries = [e for e in entries if e["count"] >= min_stocks]
+    dates = [e["date"] for e in entries]
+    return {"dates": dates, "entries": entries, "total": len(dates)}
 
 
 @router.get("/minute/{symbol}")

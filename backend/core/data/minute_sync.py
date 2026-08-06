@@ -409,6 +409,22 @@ def get_minute_calendar() -> list[str]:
     return sorted(dates)
 
 
+def get_minute_calendar_with_counts() -> list[dict]:
+    """Get dates with minute data plus per-date stock counts.
+
+    Scans directories directly (meta.json may be stale). Dates created by
+    single-stock test syncs only contain 1~2 files; callers can filter
+    them out via the count field.
+    """
+    if not MINUTE_DATA_DIR.exists():
+        return []
+    result = []
+    for d in sorted(MINUTE_DATA_DIR.iterdir()):
+        if d.is_dir() and d.name[0].isdigit():
+            result.append({"date": d.name, "count": len(list(d.glob("*.parquet")))})
+    return result
+
+
 def get_minute_stocks_for_date(date: str) -> list[str]:
     """Get list of stocks that have minute data for a given date."""
     day_dir = MINUTE_DATA_DIR / date

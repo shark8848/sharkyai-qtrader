@@ -108,6 +108,9 @@ def read_local_kline(symbol: str, days: int = 120) -> pd.DataFrame:
     df = pd.DataFrame(df_data)
     # Filter out invalid dates
     df = df[df["date"] != ""].reset_index(drop=True)
+    # Replace NaN with 0 so the JSON response never contains NaN literals
+    # (browsers' JSON.parse rejects NaN and the whole chart would fail).
+    df = df.fillna(0)
     return df
 
 

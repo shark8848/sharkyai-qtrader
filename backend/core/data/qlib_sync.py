@@ -30,6 +30,22 @@ INSTRUMENTS_DIR = QLIB_DATA_DIR / "instruments"
 # qlib .bin fields
 FIELDS = ["open", "high", "low", "close", "volume", "amount"]
 
+# A-share market closes at 15:00; wait for a buffer so the daily bar is final
+MARKET_CLOSE_BUFFER = "15:30"
+
+
+def _effective_fetch_end() -> str:
+    """Return the last date safe to sync (format: YYYYMMDD).
+
+    Before market close (plus buffer), the current day's bar is still
+    incomplete, so syncing must stop at the previous calendar day to
+    avoid writing intraday partial data into .bin files.
+    """
+    now = datetime.now()
+    if now.strftime("%H:%M") >= MARKET_CLOSE_BUFFER:
+        return now.strftime("%Y%m%d")
+    return (now - timedelta(days=1)).strftime("%Y%m%d")
+
 
 class QlibSyncTask:
     """Tracks progress of a sync operation."""
@@ -138,7 +154,9 @@ def _run_sync(market: str):
 
         # Read existing calendar
         existing_cal = _read_calendar()
-        fetch_end = datetime.now().strftime("%Y%m%d")
+        # Never fetch beyond the safe cutoff: during trading hours the
+        # current day's bar is incomplete and must not enter calendar/bins.
+        fetch_end = _effective_fetch_end()
         full_start = existing_cal[0].replace("-", "") if existing_cal else "19991110"
 
         # Step 1: Discover new trading dates by fetching a liquid stock (贵州茅台)
@@ -238,21 +256,31 @@ def _run_sync(market: str):
 
 
 def _stock_is_current(symbol: str, cal_len: int) -> bool:
-    """Check if a stock's .bin data already covers recent calendar dates."""
+    """Check if a stock's .bin data already covers recent calendar dates.
+
+    Both close and amount must reach the last calendar date: amount was
+    absent from the original qlib dump, so stocks with a missing or
+    truncated amount.day.bin must stay in the pending list.
+    """
     fname = symbol.lower()
-    close_bin = FEATURES_DIR / fname / "close.day.bin"
-    if not close_bin.exists():
-        return False
-    try:
-        raw = np.fromfile(str(close_bin), dtype="<f")
-        if len(raw) <= 1:
+    for field in ("close", "amount"):
+        bin_path = FEATURES_DIR / fname / f"{field}.day.bin"
+        if not bin_path.exists():
             return False
-        data_len = len(raw) - 1
-        start_idx = int(raw[0])
-        # If data reaches within 5 days of calendar end, consider it current
-        return (start_idx + data_len) >= (cal_len - 5)
-    except Exception:
-        return False
+        try:
+            raw = np.fromfile(str(bin_path), dtype="<f")
+            if len(raw) <= 1:
+                return False
+            data_len = len(raw) - 1
+            start_idx = int(raw[0])
+            # Strict alignment: only consider it current if data reaches the
+            # last calendar date (no tolerance), so daily syncs always append
+            # the latest trading day.
+            if (start_idx + data_len) < cal_len:
+                return False
+        except Exception:
+            return False
+    return True
 
 
 def _update_calendar(existing_cal: list[str], start: str, end: str) -> list[str]:
@@ -284,16 +312,17 @@ def _update_calendar(existing_cal: list[str], start: str, end: str) -> list[str]
 
     # Merge and save
     all_dates = sorted(set(existing_cal) | new_dates)
-    # Strip future dates: calendar must never extend beyond today.
+    # Strip dates beyond the safe fetch end: during trading hours the
+    # current day's bar is incomplete, so it must never enter the calendar.
     # Without this, any future date ever written (by scripts or bad data)
     # would be preserved forever by the union merge, inflating the
     # "needs sync" list in _stock_is_current.
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    future_dates = [d for d in all_dates if d > today_str]
+    cutoff_str = f"{end[:4]}-{end[4:6]}-{end[6:]}"
+    future_dates = [d for d in all_dates if d > cutoff_str]
     if future_dates:
-        all_dates = [d for d in all_dates if d <= today_str]
+        all_dates = [d for d in all_dates if d <= cutoff_str]
         logger.warning(
-            f"Calendar: stripped {len(future_dates)} future dates "
+            f"Calendar: stripped {len(future_dates)} dates beyond {cutoff_str} "
             f"({future_dates[0]} ~ {future_dates[-1]}), calendar now ends at {all_dates[-1] if all_dates else 'N/A'}"
         )
     CALENDARS_DIR.mkdir(parents=True, exist_ok=True)
@@ -454,8 +483,9 @@ def _fetch_stock_kline(symbol: str, start: str, end: str, max_retries: int = 3) 
     df = df[available].copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
 
-    if "amount" not in df.columns:
-        df["amount"] = df["volume"] * df["close"]
+    # NOTE: do NOT approximate amount as volume*close — the deviation is
+    # huge (0.4x~2.3x verified). Missing amount is repaired by re-syncing
+    # real values from the data source instead.
 
     return df
 
