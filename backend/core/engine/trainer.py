@@ -9,7 +9,7 @@ import os
 import uuid
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any, Optional
 from pathlib import Path
@@ -282,8 +282,13 @@ MODEL_REGISTRY: dict[str, dict] = {
         "default_kwargs": {
             "lr": 0.001,
             "optimizer": "adam",
-            "metric": "loss",
             "GPU": -1,
+            # DNN 用 pt_model_kwargs 定义网络结构，input_dim 必须与 d_feat=158 一致，
+            # 否则 mat1/mat2 shape 不匹配（默认 input_dim=360 与特征维不符）
+            "pt_model_kwargs": {
+                "input_dim": 158,
+                "layers": (256, 128),
+            },
         },
     },
     "GATs": {
@@ -667,6 +672,27 @@ class Trainer:
                     },
                 },
             }
+
+        # TabNet 需要额外的 pretrain/pretrain_validation 段（无监督预训练），
+        # 否则 pretrain_fn 里 dataset.prepare(["pretrain", "pretrain_validation"]) 抛
+        # "cannot do slice indexing on DatetimeIndex with these indexers [pretrain]"。
+        # pretrain 用 train_range 的前 80%，pretrain_validation 用后 20%。
+        if config.model_class == "TabnetModel":
+            try:
+                _tr_start = datetime.strptime(config.train_range[0], "%Y-%m-%d")
+                _tr_end = datetime.strptime(config.train_range[1], "%Y-%m-%d")
+                _span = (_tr_end - _tr_start).days
+                _pt_split = _tr_start + (_tr_end - _tr_start) * 0.8
+                dataset_config["kwargs"]["segments"]["pretrain"] = (
+                    _tr_start.strftime("%Y-%m-%d"),
+                    _pt_split.strftime("%Y-%m-%d"),
+                )
+                dataset_config["kwargs"]["segments"]["pretrain_validation"] = (
+                    (_pt_split + timedelta(days=1)).strftime("%Y-%m-%d") if _span > 0 else _tr_start.strftime("%Y-%m-%d"),
+                    config.train_range[1],
+                )
+            except Exception as e:
+                logger.warning(f"TabNet pretrain segment 配置失败（忽略）: {e}")
 
         job.update_progress(15, f"加载数据集 {config.handler} | 股票池 {config.market} ...")
 
