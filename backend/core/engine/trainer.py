@@ -475,6 +475,44 @@ class Trainer:
             self._qlib_initialized = True
             logger.info("Qlib initialized for training (expression cache enabled)")
 
+    def _patch_gats_base_model(self, model_kwargs: dict):
+        """GATs base model 维度兼容修复。
+
+        qlib 的 pytorch_gats.GATs.fit() 在初始化 base model（GRU/LSTM）时使用默认
+        d_feat=6（见 GATs 内部 GRUModel()/LSTMModel() 裸调用），而 GATs 本身按
+        d_feat=158 构建，两者 state_dict 形状不一致导致 load_state_dict 抛
+        RuntimeError。通过在模块命名空间打 patch，让 fit() 构造的 base model
+        继承 GATs 的 d_feat/hidden_size/num_layers/dropout。
+        """
+        try:
+            import qlib.contrib.model.pytorch_gats as gats_mod
+            from qlib.contrib.model.pytorch_gru import GRUModel
+            from qlib.contrib.model.pytorch_lstm import LSTMModel
+
+            d_feat = model_kwargs.get("d_feat", 158)
+            hidden_size = model_kwargs.get("hidden_size", 64)
+            num_layers = model_kwargs.get("num_layers", 2)
+            dropout = model_kwargs.get("dropout", 0.0)
+
+            def _make(orig_cls):
+                def _factory(*args, **kwargs):
+                    kwargs.setdefault("d_feat", d_feat)
+                    kwargs.setdefault("hidden_size", hidden_size)
+                    kwargs.setdefault("num_layers", num_layers)
+                    kwargs.setdefault("dropout", dropout)
+                    return orig_cls(*args, **kwargs)
+                return _factory
+
+            # 只 patch pytorch_gats 模块命名空间内的引用，不影响其他 qlib 模型
+            gats_mod.GRUModel = _make(GRUModel)
+            gats_mod.LSTMModel = _make(LSTMModel)
+            logger.info(
+                f"GATs base model patched: d_feat={d_feat}, hidden_size={hidden_size}, "
+                f"num_layers={num_layers}, dropout={dropout}"
+            )
+        except Exception as e:
+            logger.warning(f"GATs base model patch failed (ignored): {e}")
+
     def submit(self, config: TrainConfig) -> TrainJob:
         """提交训练任务"""
         job_id = f"train_{uuid.uuid4().hex[:12]}"
@@ -537,6 +575,12 @@ class Trainer:
             "kwargs": model_kwargs,
         }
         job.update_progress(10, f"模型配置: {config.model_class}")
+
+        # GATs 兼容性修复：qlib 的 GATs.fit() 内部用默认 d_feat=6 构造裸 GRUModel/LSTMModel，
+        # 与 GATs 实际 d_feat（如 158）不匹配会导致 load_state_dict 抛 RuntimeError。
+        # 这里在模型实例化前 patch 模块命名空间，使 fit() 构造 base model 时继承 GATs 的维度。
+        if config.model_class == "GATs":
+            self._patch_gats_base_model(model_kwargs)
 
         # 构建数据集配置
         if is_high_freq:
