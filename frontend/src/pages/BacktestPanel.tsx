@@ -158,14 +158,21 @@ const HYPERPARAMS: Record<string, ParamDef[]> = {
     { key: 'dropout', label: 'Dropout', type: 'number', default: 0.5, min: 0, max: 0.9, step: 0.05 },
     { key: 'n_epochs', label: '训练轮数', type: 'number', default: 200, min: 1, max: 1000, step: 10 },
     { key: 'lr', label: '学习率', type: 'number', default: 0.0001, min: 0.000001, max: 0.01, step: 0.00001 },
+    { key: 'batch_size', label: 'Batch Size', type: 'number', default: 2000, min: 64, max: 8192, step: 64 },
+    { key: 'early_stop', label: 'Early Stop', type: 'number', default: 20, min: 1, max: 100, step: 1 },
   ],
   TabnetModel: [
     { key: 'n_epochs', label: '训练轮数', type: 'number', default: 200, min: 1, max: 1000, step: 10 },
+    { key: 'pretrain_n_epochs', label: '预训练轮数', type: 'number', default: 50, min: 1, max: 500, step: 5 },
     { key: 'lr', label: '学习率', type: 'number', default: 0.001, min: 0.00001, max: 0.1, step: 0.0001 },
     { key: 'batch_size', label: 'Batch Size', type: 'number', default: 2000, min: 64, max: 8192, step: 64 },
     { key: 'early_stop', label: 'Early Stop', type: 'number', default: 20, min: 1, max: 100, step: 1 },
   ],
   DNNModelPytorch: [
+    { key: 'max_steps', label: '训练步数', type: 'number', default: 300, min: 10, max: 5000, step: 10 },
+    { key: 'eval_steps', label: '评估间隔', type: 'number', default: 20, min: 5, max: 500, step: 5 },
+    { key: 'early_stop_rounds', label: 'Early Stop', type: 'number', default: 50, min: 5, max: 500, step: 5 },
+    { key: 'batch_size', label: 'Batch Size', type: 'number', default: 2000, min: 64, max: 8192, step: 64 },
     { key: 'lr', label: '学习率', type: 'number', default: 0.001, min: 0.00001, max: 0.1, step: 0.0001 },
   ],
   GATs: [
