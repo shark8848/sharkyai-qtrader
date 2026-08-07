@@ -20,7 +20,8 @@ def _ensure_qlib_initialized(provider_uri: str, high_freq: bool = False) -> None
     训练进行中会激活 QlibRecorder（active_experiment 非空），此时再次调用
     qlib.init() 会抛 RecorderInitializationError。因此：
     - 若 qlib 已注册（C.registered）且 provider_uri 匹配：直接跳过（数据已在缓存中）
-    - 若 provider_uri 不匹配（日线/分钟切换）：需要在无 active experiment 时重新注册
+    - 若 provider_uri 不匹配（日线/分钟切换）且训练进行中：抛 ValueError，明确告知用户
+    - 若 provider_uri 不匹配且无活跃训练：安全重注册
     """
     import qlib
     from qlib.config import C
@@ -32,15 +33,16 @@ def _ensure_qlib_initialized(provider_uri: str, high_freq: bool = False) -> None
         current = str(C["provider_uri"].get("__DEFAULT_FREQ", ""))
         if current == str(provider_uri):
             return
-        # 数据源不同：若训练未在跑则可安全重注册，否则复用现有注册（数据不一致时由调用方兜底）
+        # 数据源不同：若训练未在跑则可安全重注册，否则给出明确错误
         try:
             from qlib.workflow import R
             if getattr(R, "exp_manager", None) is not None and R.exp_manager.active_experiment is not None:
-                logger.warning(
-                    "训练任务进行中，无法切换 qlib 数据源 %s -> %s，复用现有注册",
-                    current, provider_uri,
+                raise ValueError(
+                    f"训练任务进行中，无法切换 qlib 数据源 {current} -> {provider_uri}，"
+                    f"请等待训练完成后再发起该预测"
                 )
-                return
+        except ValueError:
+            raise
         except Exception:
             pass
 
@@ -436,26 +438,48 @@ def _predict_minute(symbol: str, date: Optional[str], model_id: Optional[str]) -
         model = store.load_model(meta["model_id"])
         model_id = meta["model_id"]
 
-    # Build dataset for prediction using HighFreqHandler
+    # Build dataset for prediction using the same handler as HFLGBModel training.
+    # 注意：必须与 trainer.py 中 HFLGBModel 的训练配置一致（DataHandlerLP + dict config +
+    # swap_level=False），否则列结构与模型期望不匹配。HighFreqHandler 返回单级列名，
+    # RobustZScoreNorm 期望 MultiIndex（feature/label），会导致 KeyError: 'feature'。
     from qlib.utils import init_instance_by_config
+    from qlib.contrib.data.highfreq_handler import HighFreqHandler as _HFH
 
     # Use a wider range for handler fitting
     cal_dates = sorted(cal_series.dt.strftime("%Y-%m-%d").unique())
     fit_start = str(cal[0])
     fit_end = start_time
 
+    _tmp = _HFH.__new__(_HFH)
+    feature_fields, feature_names = _tmp.get_feature_config()
+    label_fields = ["Ref($close, -10)/$close - 1"]
+    label_names = ["LABEL0"]
+
     handler_config = {
-        "class": "HighFreqHandler",
-        "module_path": "qlib.contrib.data.highfreq_handler",
+        "class": "DataHandlerLP",
+        "module_path": "qlib.data.dataset.handler",
         "kwargs": {
             "start_time": fit_start,
             "end_time": end_time,
-            "fit_start_time": fit_start,
-            "fit_end_time": fit_end,
             "instruments": [symbol.upper()],
+            "data_loader": {
+                "class": "QlibDataLoader",
+                "kwargs": {
+                    "config": {
+                        "feature": (feature_fields, feature_names),
+                        "label": (label_fields, label_names),
+                    },
+                    "swap_level": False,
+                    "freq": "1min",
+                },
+            },
             "infer_processors": [
-                {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": False}},
+                {"class": "RobustZScoreNorm", "kwargs": {"fields_group": "feature", "clip_outlier": False, "fit_start_time": fit_start, "fit_end_time": fit_end}},
                 {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
+            ],
+            "learn_processors": [
+                {"class": "DropnaLabel"},
+                {"class": "CSRankNorm", "kwargs": {"fields_group": "label"}},
             ],
         },
     }
@@ -475,7 +499,9 @@ def _predict_minute(symbol: str, date: Optional[str], model_id: Optional[str]) -
     dataset = init_instance_by_config(dataset_config)
 
     # Generate predictions
-    pred = model.predict(dataset, segment="test")
+    # HFLGBModel.predict(dataset) 不接受 segment 参数（内部硬编码 prepare("test")），
+    # 此处传 segment 会抛 TypeError，故省略。
+    pred = model.predict(dataset)
 
     # Get actual price data for the day
     df_price = D.features(

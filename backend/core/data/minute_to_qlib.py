@@ -25,7 +25,7 @@ MINUTE_DATA_DIR = Path.home() / ".qtrader" / "minute_data"
 QLIB_1MIN_DIR = Path.home() / ".qlib" / "qlib_data" / "cn_data_1min"
 DAY_INST_DIR = Path.home() / ".qlib" / "qlib_data" / "cn_data" / "instruments"
 
-FEATURES = ["open", "high", "low", "close", "volume"]
+FEATURES = ["open", "high", "low", "close", "volume", "vwap", "paused_num"]
 FREQ = "1min"
 BIN_SUFFIX = ".bin"
 
@@ -72,6 +72,56 @@ def get_convert_status() -> dict:
         if feat_dir.exists():
             d["qlib_stocks"] = len([p for p in feat_dir.iterdir() if p.is_dir()])
     return d
+
+
+def patch_missing_features() -> dict:
+    """增量补齐历史转换缺失的 paused_num 字段。
+
+    qlib 的 HighFreqHandler 特征表达式依赖 $paused_num（Select(Gt($paused_num, 1.001))），
+    但历史 1min 转换只生成了 open/high/low/close/volume，导致分钟预测/训练崩溃。
+    本函数遍历已有特征目录，为缺失股票补写 paused_num（固定 2.0，正常成交分钟）。
+    vwap 缺失不影响 handler（If(IsNull($vwap), $close, $vwap) 兜底），无需补齐。
+    """
+    import numpy as np
+
+    if not QLIB_1MIN_DIR.exists():
+        return {"error": f"Qlib 1min 目录不存在: {QLIB_1MIN_DIR}"}
+
+    feat_dir = QLIB_1MIN_DIR / "features"
+    patched = {"paused_num": 0, "skipped": 0}
+
+    for stock_dir in feat_dir.iterdir():
+        if not stock_dir.is_dir():
+            continue
+
+        # 以 close bin 为参考（决定 start index 与长度）
+        ref_bin = stock_dir / "close.1min.bin"
+        if not ref_bin.exists():
+            patched["skipped"] += 1
+            continue
+        try:
+            ref = np.fromfile(str(ref_bin), dtype="<f")
+            start_idx = int(ref[0])
+            n = len(ref) - 1
+            if n <= 0:
+                patched["skipped"] += 1
+                continue
+        except Exception:
+            patched["skipped"] += 1
+            continue
+
+        # paused_num：固定 2.0（正常成交分钟），无源数据依赖。
+        # qlib HighFreqHandler 用 Select(Gt($paused_num, 1.001), ...) 过滤暂停分钟，
+        # 缺该字段会导致特征表达式为空、分钟预测/训练崩溃。vwap 缺失则由
+        # handler 内 If(IsNull($vwap), $close, $vwap) 兜底，无需补齐。
+        pn_path = stock_dir / "paused_num.1min.bin"
+        if not pn_path.exists():
+            pn = np.full(n + 1, 2.0, dtype="<f")
+            pn[0] = start_idx
+            pn.tofile(str(pn_path))
+            patched["paused_num"] += 1
+
+    return patched
 
 
 def start_convert() -> dict:
@@ -230,6 +280,19 @@ def _run_convert():
                 start_idx = cal_index.get(first_ts)
                 if start_idx is None:
                     continue
+
+                # 计算 vwap（成交额/成交量）与 paused_num（qlib 高频 handler 依赖）
+                # - vwap：源数据有 amount 列，vwap = amount / volume，volume 为 0 时回退 close
+                # - paused_num：qlib 用 Gt($paused_num, 1.001) 过滤暂停分钟；AKShare 聚合的
+                #   连续分钟 bar 均为正常成交，参考 qlib 官方数据取 2.0
+                if "amount" in merged.columns and "volume" in merged.columns:
+                    volume = pd.to_numeric(merged["volume"], errors="coerce").fillna(0)
+                    amount = pd.to_numeric(merged["amount"], errors="coerce").fillna(0)
+                    vwap = amount / volume.replace(0, np.nan)
+                    merged["vwap"] = vwap.fillna(merged["close"])
+                else:
+                    merged["vwap"] = merged["close"]
+                merged["paused_num"] = 2.0
 
                 # Write each feature as .bin
                 for field in FEATURES:

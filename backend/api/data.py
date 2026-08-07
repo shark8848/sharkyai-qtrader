@@ -18,6 +18,7 @@ from qtrader.backend.core.data.minute_sync import (
 from qtrader.backend.core.data.minute_to_qlib import (
     start_convert,
     get_convert_status,
+    patch_missing_features,
 )
 
 router = APIRouter()
@@ -195,6 +196,13 @@ async def raw_kline(symbol: str, days: int = Query(120, ge=1, le=5000)):
 async def convert_1min():
     """Convert Parquet minute data to Qlib 1min .bin format."""
     result = start_convert()
+    return result
+
+
+@router.post("/convert_1min/patch")
+async def convert_1min_patch():
+    """增量补齐历史转换缺失的 paused_num/vwap 字段（qlib HighFreqHandler 依赖）。"""
+    result = patch_missing_features()
     return result
 
 
