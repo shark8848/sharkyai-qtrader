@@ -464,15 +464,38 @@ class Trainer:
             logger.warning(f"Failed to persist job {job.job_id}: {e}")
 
     def _ensure_qlib(self, high_freq: bool = False):
-        """延迟初始化 qlib"""
+        """延迟初始化 qlib，日线/高频数据源之间正确切换。
+
+        高频训练会把 qlib 初始化到 cn_data_1min，之后日线训练若不切回
+        cn_data 会报 "does not contain data for day"。因此按请求的数据源
+        检查当前注册（C.registered + provider_uri），不一致时重新 init。
+        """
         os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
         import qlib
         from qlib.constant import REG_CN
+        from qlib.config import C
 
+        from pathlib import Path
+        hf_dir = str(Path.home() / ".qlib" / "qlib_data" / "cn_data_1min")
+        day_dir = self._data_dir
+        want = hf_dir if high_freq else day_dir
+
+        # 当前已注册数据源
+        current = ""
+        if C.registered:
+            current = str(C["provider_uri"].get("__DEFAULT_FREQ", ""))
+
+        # 已注册且数据源一致：直接复用（首次注册也复用 C 的全局状态）
+        if C.registered and current == want:
+            if high_freq:
+                logger.info("Qlib already initialized for HIGH-FREQ (1min)")
+            else:
+                logger.info("Qlib already initialized for training (day)")
+            return
+
+        # 数据源不同：重新 init 切换（训练是串行的，无 active experiment 冲突）
         if high_freq:
-            from pathlib import Path
             from qlib.contrib.ops.high_freq import DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut
-            hf_dir = str(Path.home() / ".qlib" / "qlib_data" / "cn_data_1min")
             qlib.init(
                 provider_uri=hf_dir,
                 region=REG_CN,
@@ -480,10 +503,11 @@ class Trainer:
                 expression_cache=None,  # 高频Select算子与DiskExpressionCache不兼容
                 kernels=1,  # 单进程避免uvicorn内多进程死锁
             )
+            self._qlib_initialized = True
             logger.info("Qlib initialized for HIGH-FREQ training (1min)")
-        elif not self._qlib_initialized:
+        else:
             qlib.init(
-                provider_uri=self._data_dir,
+                provider_uri=day_dir,
                 region=REG_CN,
                 expression_cache="DiskExpressionCache",
                 kernels=min(os.cpu_count() or 4, 16),
