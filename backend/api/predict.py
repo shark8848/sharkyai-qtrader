@@ -14,6 +14,50 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _ensure_qlib_initialized(provider_uri: str, high_freq: bool = False) -> None:
+    """安全初始化 qlib，避免与训练任务并发时重复注册。
+
+    训练进行中会激活 QlibRecorder（active_experiment 非空），此时再次调用
+    qlib.init() 会抛 RecorderInitializationError。因此：
+    - 若 qlib 已注册（C.registered）且 provider_uri 匹配：直接跳过（数据已在缓存中）
+    - 若 provider_uri 不匹配（日线/分钟切换）：需要在无 active experiment 时重新注册
+    """
+    import qlib
+    from qlib.config import C
+
+    os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
+
+    # 已注册且数据源一致：无需重复初始化
+    if C.registered:
+        current = str(C["provider_uri"].get("__DEFAULT_FREQ", ""))
+        if current == str(provider_uri):
+            return
+        # 数据源不同：若训练未在跑则可安全重注册，否则复用现有注册（数据不一致时由调用方兜底）
+        try:
+            from qlib.workflow import R
+            if getattr(R, "exp_manager", None) is not None and R.exp_manager.active_experiment is not None:
+                logger.warning(
+                    "训练任务进行中，无法切换 qlib 数据源 %s -> %s，复用现有注册",
+                    current, provider_uri,
+                )
+                return
+        except Exception:
+            pass
+
+    # 未注册，或数据源不同且无活跃训练：初始化
+    from qlib.constant import REG_CN
+    if high_freq:
+        from qlib.contrib.ops.high_freq import DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut
+        qlib.init(
+            provider_uri=provider_uri,
+            region=REG_CN,
+            custom_ops=[DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut],
+            expression_cache=None,
+        )
+    else:
+        qlib.init(provider_uri=provider_uri, region=REG_CN)
+
+
 class PredictRequest(BaseModel):
     model_id: str
     symbol: str  # e.g. "SH600519"
@@ -31,12 +75,9 @@ class MinutePredictRequest(BaseModel):
 async def get_data_range():
     """Return the available data date range."""
     try:
-        import qlib
-        from qlib.constant import REG_CN
         from pathlib import Path
-        os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
         data_dir = str(Path.home() / ".qlib" / "qlib_data" / "cn_data")
-        qlib.init(provider_uri=data_dir, region=REG_CN)
+        _ensure_qlib_initialized(data_dir)
         from qlib.data import D
         cal = D.calendar(freq="day")
         if len(cal) == 0:
@@ -128,13 +169,10 @@ def _predict_single_stock(
     """Synchronous prediction logic."""
     os.environ.setdefault("MLFLOW_ALLOW_FILE_STORE", "true")
 
-    import qlib
-    from qlib.constant import REG_CN
-
-    # 始终调用 qlib.init()（可重复调用，与 trainer 保持一致）
     from pathlib import Path
     data_dir = str(Path.home() / ".qlib" / "qlib_data" / "cn_data")
-    qlib.init(provider_uri=data_dir, region=REG_CN)
+    # 安全初始化：训练进行中不重复注册（避免 RecorderInitializationError）
+    _ensure_qlib_initialized(data_dir)
 
     # 校验日期范围是否在数据覆盖内
     from qlib.data import D
@@ -354,18 +392,8 @@ def _predict_minute(symbol: str, date: Optional[str], model_id: Optional[str]) -
             "Qlib 1min 数据目录不存在，请先在数据管理页面执行「转换为 Qlib 1min」"
         )
 
-    # Initialize qlib with high-freq config
-    import qlib
-    from qlib.constant import REG_CN
-    from qlib.config import HIGH_FREQ_CONFIG
-    from qlib.contrib.ops.high_freq import DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut
-
-    qlib.init(
-        provider_uri=str(qlib_1min_dir),
-        region=REG_CN,
-        custom_ops=[DayLast, FFillNan, BFillNan, Date, Select, IsNull, IsInf, Cut],
-        expression_cache=None,
-    )
+    # 安全初始化：训练进行中不重复注册（避免 RecorderInitializationError）
+    _ensure_qlib_initialized(str(qlib_1min_dir), high_freq=True)
 
     # Determine date range
     from qlib.data import D
