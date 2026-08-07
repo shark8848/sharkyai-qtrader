@@ -88,6 +88,17 @@ class TrainJob:
 
     def to_dict(self) -> dict:
         import math
+
+        def _clean(v):
+            """递归替换 NaN/Inf 为 None，保证 JSON 可序列化。"""
+            if isinstance(v, float):
+                return None if (math.isnan(v) or math.isinf(v)) else v
+            if isinstance(v, list):
+                return [_clean(item) for item in v]
+            if isinstance(v, dict):
+                return {k: _clean(item) for k, item in v.items()}
+            return v
+
         # Sanitize metrics: replace NaN/Inf with None for JSON compliance
         clean_metrics = None
         if self.metrics:
@@ -108,7 +119,7 @@ class TrainJob:
                 "current_step": self.current_step,
                 "logs": list(self.logs),
                 "config": self.config.model_dump(),
-                "train_history": self.train_history,
+                "train_history": _clean(self.train_history),
             }
 
 
