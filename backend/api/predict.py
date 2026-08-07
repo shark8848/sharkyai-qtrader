@@ -279,6 +279,30 @@ def _predict_single_stock(
     except ImportError:
         pass
 
+    # GATs 单股预测兼容：GATModel.forward 最后 fc_out(hidden).squeeze() 在 batch=1
+    # （单只股票每天 1 行）时压成 0 维标量，np.concatenate(preds) 抛
+    # "zero-dimensional arrays cannot be concatenated"。包装 forward，将 0 维输出
+    # reshape 成 (1,)，使 predict 能正常 concat。仅对 GATs 模型生效。
+    if type(model).__name__ == "GATs":
+        try:
+            import torch
+            from qlib.contrib.model.pytorch_gats import GATModel
+
+            _orig_forward = GATModel.forward
+            if not getattr(_orig_forward, "_squeeze_patched", False):
+                def _safe_forward(self, x):
+                    result = _orig_forward(self, x)
+                    if isinstance(result, torch.Tensor) and result.dim() == 0:
+                        result = result.reshape(1)
+                    return result
+
+                _safe_forward._squeeze_patched = True
+                GATModel.forward = _safe_forward
+                # 同步替换已实例化模型的绑定方法
+                model.GAT_model.forward = GATModel.forward.__get__(model.GAT_model, GATModel)
+        except Exception:
+            logger.warning("GATs forward squeeze patch failed (ignored)")
+
     # Generate predictions
     pred = model.predict(dataset, segment="test")
 
