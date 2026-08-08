@@ -5,6 +5,8 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from qtrader.backend.core.data.manager import data_manager
+from qtrader.backend.core.data.orchestrator import orchestrator
+from qtrader.backend.core.data.catalog import data_catalog
 from qtrader.backend.core.data.qlib_sync import start_sync, stop_sync, get_sync_status
 from qtrader.backend.core.data.local_reader import read_local_kline, read_raw_kline
 from qtrader.backend.core.data.minute_sync import (
@@ -28,6 +30,12 @@ router = APIRouter()
 async def list_sources():
     """List all available data sources and their status."""
     return data_manager.list_sources()
+
+
+@router.get("/sources/health")
+async def sources_health():
+    """Run health checks on all registered data sources."""
+    return await data_manager.health_check_all()
 
 
 @router.put("/source")
@@ -110,6 +118,52 @@ async def sync_qlib_status():
 async def sync_qlib_stop():
     """Request a clean stop of the running sync task (keeps checkpoint)."""
     return stop_sync()
+
+
+# === Unified sync orchestrator ===
+
+
+@router.post("/sync/unified")
+async def unified_sync(
+    source_id: str = Query("akshare", description="Data source: akshare/sina/eastmoney"),
+    market: str = Query("all", description="Stock pool"),
+    freq: str = Query("daily", description="daily / 1min / 5min ..."),
+    target: str = Query("qlib_bin", description="qlib_bin / parquet / sqlite"),
+):
+    """Start a unified sync job (source x market x freq -> target storage)."""
+    return orchestrator.submit(source_id, market, freq, target)
+
+
+@router.get("/sync/jobs")
+async def sync_jobs():
+    """List all sync jobs."""
+    return orchestrator.list_jobs()
+
+
+@router.get("/sync/jobs/{job_id}")
+async def sync_job_detail(job_id: str):
+    """Get a sync job's current status."""
+    return orchestrator.get_job(job_id)
+
+
+# === Dataset catalog ===
+
+
+@router.get("/datasets")
+async def list_datasets():
+    """List all datasets with coverage and freshness."""
+    datasets = data_catalog.annotate_freshness(data_catalog.list_all())
+    return datasets
+
+
+@router.post("/datasets/{dataset_id}/resync")
+async def resync_dataset(dataset_id: str):
+    """Re-sync a dataset (re-run the underlying sync)."""
+    ds = data_catalog.get(dataset_id)
+    if not ds:
+        return {"error": f"数据集不存在: {dataset_id}"}
+    result = start_sync(market=ds["market"], source_id=ds["source_id"])
+    return result
 
 
 # === Minute-level data endpoints ===

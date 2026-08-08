@@ -1,18 +1,46 @@
 import { useState, useEffect, useRef } from 'react'
-import { Card, Select, Button, Space, Tag, message, Progress } from 'antd'
-import { SyncOutlined, CloudSyncOutlined, LineChartOutlined, SwapOutlined } from '@ant-design/icons'
+import { Tabs, Card, Select, Button, Space, Tag, message, Progress, Empty } from 'antd'
+import {
+  SyncOutlined,
+  CloudSyncOutlined,
+  LineChartOutlined,
+  SwapOutlined,
+  DatabaseOutlined,
+  AppstoreOutlined,
+  ClockCircleOutlined,
+} from '@ant-design/icons'
 import axios from 'axios'
 import StockChart from '../components/StockChart'
+import SourceCard from '../components/data/SourceCard'
+import SyncForm from '../components/data/SyncForm'
+import SyncTaskList from '../components/data/SyncTaskList'
+import DatasetCard from '../components/data/DatasetCard'
+import AutoSyncPanel from '../components/data/AutoSyncPanel'
+import {
+  fetchSources,
+  switchSource as apiSwitchSource,
+  startQlibSync,
+  fetchQlibSyncStatus,
+  startMinuteSync,
+  fetchMinuteSyncStatus,
+  startConvert1min,
+  fetchConvertStatus,
+  fetchDatasets,
+} from '../api/data'
 
 interface DataSource {
   id: string
   name: string
   active: boolean
+  capabilities: string[]
+  data_format: string
 }
 
 export default function DataManager() {
+  const [tab, setTab] = useState('sources')
   const [sources, setSources] = useState<DataSource[]>([])
   const [activeSource, setActiveSource] = useState('')
+  const [datasets, setDatasets] = useState<any[]>([])
 
   // Qlib 同步状态
   const [syncStatus, setSyncStatus] = useState<any>(null)
@@ -27,32 +55,29 @@ export default function DataManager() {
   const convertPollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
-    fetchSources()
+    fetchSources().then(data => {
+      setSources(data)
+      const active = data.find((s: DataSource) => s.active)
+      if (active) setActiveSource(active.id)
+    })
+    fetchDatasets().then(data => setDatasets(data)).catch(() => {})
   }, [])
 
-  const fetchSources = async () => {
-    const res = await axios.get('/api/data/sources')
-    setSources(res.data)
-    const active = res.data.find((s: DataSource) => s.active)
-    if (active) setActiveSource(active.id)
-  }
-
   const switchSource = async (sourceId: string) => {
-    await axios.put('/api/data/source', null, { params: { source_id: sourceId } })
+    await apiSwitchSource(sourceId)
     setActiveSource(sourceId)
-    message.success(`已切换到 ${sourceId}`)
+    message.success(`已切换查询默认源到 ${sourceId}`)
   }
 
-  // === Qlib 同步 ===
-  const startQlibSync = async () => {
+  // === 同步轮询 ===
+  const startQlibSyncClick = async () => {
     try {
-      const res = await axios.post('/api/data/sync_qlib', null, { params: { market: 'all' } })
-      if (res.data.error) {
-        message.warning(res.data.error)
+      const res = await startQlibSync('all')
+      if (res.error) {
+        message.warning(res.error)
         return
       }
-      message.info('同步任务已启动')
-      // 开始轮询进度
+      message.info('日线同步任务已启动')
       syncPollRef.current = setInterval(pollSyncStatus, 2000)
       pollSyncStatus()
     } catch {
@@ -62,38 +87,40 @@ export default function DataManager() {
 
   const pollSyncStatus = async () => {
     try {
-      const res = await axios.get('/api/data/sync_qlib/status')
-      setSyncStatus(res.data)
-      if (res.data.status === 'done' || res.data.status === 'error') {
+      const res = await fetchQlibSyncStatus()
+      setSyncStatus(res)
+      if (res.status === 'done' || res.status === 'error') {
         if (syncPollRef.current) clearInterval(syncPollRef.current)
         syncPollRef.current = null
-        if (res.data.status === 'done') message.success(res.data.message)
-        else message.error(res.data.message)
+        if (res.status === 'done') message.success(res.message)
+        else message.error(res.message)
+        // 刷新数据集
+        fetchDatasets().then(d => setDatasets(d)).catch(() => {})
       }
     } catch { /* ignore */ }
   }
 
-  // 页面加载时检查是否有正在运行的同步，自动启动轮询
+  // 页面加载时检查运行中的任务
   useEffect(() => {
     const initPoll = async () => {
       try {
-        const res = await axios.get('/api/data/sync_qlib/status')
-        setSyncStatus(res.data)
-        if (res.data.status === 'running' && !syncPollRef.current) {
+        const res = await fetchQlibSyncStatus()
+        setSyncStatus(res)
+        if (res.status === 'running' && !syncPollRef.current) {
           syncPollRef.current = setInterval(pollSyncStatus, 2000)
         }
       } catch { /* ignore */ }
       try {
-        const res2 = await axios.get('/api/data/sync_minute/status')
-        setMinSyncStatus(res2.data)
-        if (res2.data.status === 'running' && !minSyncPollRef.current) {
+        const res2 = await fetchMinuteSyncStatus()
+        setMinSyncStatus(res2)
+        if (res2.status === 'running' && !minSyncPollRef.current) {
           minSyncPollRef.current = setInterval(pollMinSyncStatus, 2000)
         }
       } catch { /* ignore */ }
       try {
-        const res3 = await axios.get('/api/data/convert_1min/status')
-        setConvertStatus(res3.data)
-        if (res3.data.status === 'running' && !convertPollRef.current) {
+        const res3 = await fetchConvertStatus()
+        setConvertStatus(res3)
+        if (res3.status === 'running' && !convertPollRef.current) {
           convertPollRef.current = setInterval(pollConvertStatus, 2000)
         }
       } catch { /* ignore */ }
@@ -106,12 +133,11 @@ export default function DataManager() {
     }
   }, [])
 
-  // === 分钟数据同步 ===
-  const startMinuteSync = async () => {
+  const startMinuteSyncClick = async () => {
     try {
-      const res = await axios.post('/api/data/sync_minute', null, { params: { market: 'all', period: '1' } })
-      if (res.data.error) {
-        message.warning(res.data.error)
+      const res = await startMinuteSync('all', '1')
+      if (res.error) {
+        message.warning(res.error)
         return
       }
       message.info('分钟数据同步已启动')
@@ -124,23 +150,22 @@ export default function DataManager() {
 
   const pollMinSyncStatus = async () => {
     try {
-      const res = await axios.get('/api/data/sync_minute/status')
-      setMinSyncStatus(res.data)
-      if (res.data.status === 'done' || res.data.status === 'error') {
+      const res = await fetchMinuteSyncStatus()
+      setMinSyncStatus(res)
+      if (res.status === 'done' || res.status === 'error') {
         if (minSyncPollRef.current) clearInterval(minSyncPollRef.current)
         minSyncPollRef.current = null
-        if (res.data.status === 'done') message.success(res.data.message)
-        else if (res.data.status === 'error') message.error(res.data.message)
+        if (res.status === 'done') message.success(res.message)
+        else if (res.status === 'error') message.error(res.message)
       }
     } catch { /* ignore */ }
   }
 
-  // === Qlib 1min 转换 ===
-  const startConvert = async () => {
+  const startConvertClick = async () => {
     try {
-      const res = await axios.post('/api/data/convert_1min')
-      if (res.data.error) {
-        message.warning(res.data.error)
+      const res = await startConvert1min()
+      if (res.error) {
+        message.warning(res.error)
         return
       }
       message.info('Parquet → Qlib 1min 转换已启动')
@@ -153,133 +178,156 @@ export default function DataManager() {
 
   const pollConvertStatus = async () => {
     try {
-      const res = await axios.get('/api/data/convert_1min/status')
-      setConvertStatus(res.data)
-      if (res.data.status === 'done' || res.data.status === 'error') {
+      const res = await fetchConvertStatus()
+      setConvertStatus(res)
+      if (res.status === 'done' || res.status === 'error') {
         if (convertPollRef.current) clearInterval(convertPollRef.current)
         convertPollRef.current = null
-        if (res.data.status === 'done') message.success(res.data.message)
-        else if (res.data.status === 'error') message.error(res.data.message)
+        if (res.status === 'done') message.success(res.message)
+        else if (res.status === 'error') message.error(res.message)
       }
     } catch { /* ignore */ }
+  }
+
+  const renderSyncProgress = (status: any) => {
+    if (!status) return null
+    return (
+      <div style={{ marginTop: 12 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+          <span style={{ fontWeight: 500 }}>
+            已同步 {status.overall_synced}/{(status.total_stocks || 0) + (status.skip_stocks || 0)} 只
+          </span>
+          <span style={{ color: '#1677ff' }}>{status.overall_pct}%</span>
+        </div>
+        <Progress
+          percent={status.overall_pct}
+          status={status.status === 'error' ? 'exception' : status.status === 'done' ? 'success' : status.status === 'running' ? 'active' : 'normal'}
+          size="small"
+          showInfo={false}
+        />
+        {status.message && status.status !== 'idle' && (
+          <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>{status.message}</div>
+        )}
+      </div>
+    )
   }
 
   return (
     <div>
       <h2>数据管理</h2>
 
-      <Card title="数据源" style={{ marginBottom: 16 }}>
-        <Space wrap>
-          <span>当前数据源：</span>
-          <Select
-            value={activeSource}
-            onChange={switchSource}
-            style={{ width: 200 }}
-            options={sources.map(s => ({ value: s.id, label: `${s.name} ${s.active ? '(当前)' : ''}` }))}
-          />
-          <Button icon={<SyncOutlined />} onClick={fetchSources}>刷新</Button>
-        </Space>
-      </Card>
+      <Tabs
+        activeKey={tab}
+        onChange={setTab}
+        items={[
+          {
+            key: 'sources',
+            label: (
+              <span>
+                <DatabaseOutlined /> 数据源
+              </span>
+            ),
+            children: (
+              <div>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+                  {sources.map(s => (
+                    <SourceCard key={s.id} source={s} onSwitch={switchSource} onToggle={() => {}} />
+                  ))}
+                </div>
+                <Card size="small" style={{ marginTop: 12 }}>
+                  <p style={{ margin: 0, fontSize: 13, color: '#888' }}>
+                    多源并存：所有数据源同时可用，可分别作为同步/训练的渠道。设置"查询默认"仅影响不带
+                    source 参数的数据查询接口。
+                  </p>
+                </Card>
+              </div>
+            ),
+          },
+          {
+            key: 'sync',
+            label: (
+              <span>
+                <CloudSyncOutlined /> 同步任务
+              </span>
+            ),
+            children: (
+              <div>
+                <SyncForm onStarted={() => {}} />
+                <SyncTaskList />
+              </div>
+            ),
+          },
+          {
+            key: 'datasets',
+            label: (
+              <span>
+                <AppstoreOutlined /> 数据集
+              </span>
+            ),
+            children: (
+              <div>
+                {datasets.length === 0 ? (
+                  <Empty description="暂无数据集。完成一次同步后，这里会显示可用的数据集（含覆盖度与新鲜度）" />
+                ) : (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: 12 }}>
+                    {datasets.map(d => (
+                      <DatasetCard key={d.dataset_id} dataset={d} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            ),
+          },
+          {
+            key: 'autosync',
+            label: (
+              <span>
+                <ClockCircleOutlined /> 自动同步
+              </span>
+            ),
+            children: <AutoSyncPanel />,
+          },
+        ]}
+      />
 
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
-        <Card title="日线数据同步" extra={<Tag color="blue">Qlib .bin</Tag>}>
-          <p style={{ fontSize: 13, color: '#888', margin: '0 0 4px' }}>
-            全市场日K线 → Qlib 二进制格式，用于模型训练与预测
-          </p>
+      {/* 快速操作区：保留传统日线/分钟/转换入口 */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
+        <Card title="日线数据同步" size="small" extra={<Tag color="blue">Qlib .bin</Tag>}>
+          <p style={{ fontSize: 13, color: '#888', margin: '0 0 4px' }}>全市场日K线 → Qlib 二进制（训练用）</p>
           {syncStatus?.data_start && (
             <p style={{ fontSize: 12, color: '#aaa', margin: '0 0 12px' }}>
               数据范围：{syncStatus.data_start} ~ {syncStatus.data_end}（{syncStatus.data_days} 个交易日）
             </p>
           )}
-          <Button
-            type="primary"
-            icon={<CloudSyncOutlined spin={syncStatus?.status === 'running'} />}
-            onClick={startQlibSync}
-            loading={syncStatus?.status === 'running'}
-            block
-          >
+          <Button type="primary" icon={<SyncOutlined spin={syncStatus?.status === 'running'} />} onClick={startQlibSyncClick} loading={syncStatus?.status === 'running'} block>
             同步日线数据
           </Button>
-          {syncStatus && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                <span style={{ fontWeight: 500 }}>已同步 {syncStatus.overall_synced}/{(syncStatus.total_stocks || 0) + (syncStatus.skip_stocks || 0)} 只</span>
-                <span style={{ color: '#1677ff' }}>{syncStatus.overall_pct}%</span>
-              </div>
-              <Progress
-                percent={syncStatus.overall_pct}
-                status={syncStatus.status === 'error' ? 'exception' : syncStatus.status === 'done' ? 'success' : syncStatus.status === 'running' ? 'active' : 'normal'}
-                size="small"
-                showInfo={false}
-              />
-              {syncStatus.status !== 'idle' && (
-                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
-                  新增 <b style={{ color: '#52c41a' }}>{syncStatus.success_stocks}</b> | 失败 {syncStatus.fail_stocks || 0}
-                </div>
-              )}
-            </div>
-          )}
+          {renderSyncProgress(syncStatus)}
         </Card>
 
-        <Card title="分钟数据同步" extra={<Tag color="blue">Parquet</Tag>}>
-          <p style={{ fontSize: 13, color: '#888', margin: '0 0 4px' }}>
-            1分钟K线 → Parquet 存储，用于分时浏览与日内因子
-          </p>
+        <Card title="分钟数据同步" size="small" extra={<Tag color="purple">Parquet</Tag>}>
+          <p style={{ fontSize: 13, color: '#888', margin: '0 0 4px' }}>1分钟K线 → Parquet 存储</p>
           {minSyncStatus?.data_start && (
             <p style={{ fontSize: 12, color: '#aaa', margin: '0 0 12px' }}>
-              数据范围：{minSyncStatus.data_start} ~ {minSyncStatus.data_end}（{minSyncStatus.data_days} 个交易日）
+              数据范围：{minSyncStatus.data_start} ~ {minSyncStatus.data_end}
             </p>
           )}
-          <Button
-            type="primary"
-            icon={<LineChartOutlined spin={minSyncStatus?.status === 'running'} />}
-            onClick={startMinuteSync}
-            loading={minSyncStatus?.status === 'running'}
-            block
-          >
+          <Button type="primary" icon={<LineChartOutlined spin={minSyncStatus?.status === 'running'} />} onClick={startMinuteSyncClick} loading={minSyncStatus?.status === 'running'} block>
             同步分钟数据
           </Button>
-          {minSyncStatus && (
-            <div style={{ marginTop: 12 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
-                <span style={{ fontWeight: 500 }}>已同步 {minSyncStatus.overall_synced}/{(minSyncStatus.total_stocks || 0) + (minSyncStatus.skip_stocks || 0)} 只</span>
-                <span style={{ color: '#1677ff' }}>{minSyncStatus.overall_pct}%</span>
-              </div>
-              <Progress
-                percent={minSyncStatus.overall_pct}
-                status={minSyncStatus.status === 'error' ? 'exception' : minSyncStatus.status === 'done' ? 'success' : minSyncStatus.status === 'running' ? 'active' : 'normal'}
-                size="small"
-                showInfo={false}
-              />
-              {minSyncStatus.status !== 'idle' && (
-                <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>
-                  新增 <b style={{ color: '#52c41a' }}>{minSyncStatus.success_stocks}</b> | 失败 {minSyncStatus.fail_stocks || 0}
-                </div>
-              )}
-            </div>
-          )}
-          {/* Convert to Qlib 1min */}
-          <div style={{ marginTop: 16, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
-            <Button
-              icon={<SwapOutlined spin={convertStatus?.status === 'running'} />}
-              onClick={startConvert}
-              loading={convertStatus?.status === 'running'}
-              block
-            >
+          {renderSyncProgress(minSyncStatus)}
+          <div style={{ marginTop: 12, borderTop: '1px solid #f0f0f0', paddingTop: 12 }}>
+            <Button icon={<SwapOutlined spin={convertStatus?.status === 'running'} />} onClick={startConvertClick} loading={convertStatus?.status === 'running'} block>
               转换为 Qlib 1min（高频训练用）
             </Button>
             {convertStatus?.qlib_stocks > 0 && convertStatus.status !== 'running' && (
               <p style={{ fontSize: 12, color: '#aaa', margin: '8px 0 0' }}>
-                已转换: {convertStatus.qlib_stocks} 只股票，{convertStatus.qlib_bars || 0} 个时间戳
+                已转换: {convertStatus.qlib_stocks} 只，{convertStatus.qlib_bars || 0} 个时间戳
               </p>
             )}
             {convertStatus && convertStatus.status === 'running' && (
               <div style={{ marginTop: 8 }}>
-                <Progress
-                  percent={convertStatus.progress}
-                  status="active"
-                  size="small"
-                />
+                <Progress percent={convertStatus.progress} status="active" size="small" />
                 <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>{convertStatus.message}</div>
               </div>
             )}
@@ -287,7 +335,7 @@ export default function DataManager() {
         </Card>
       </div>
 
-      <Card title="行情图表">
+      <Card title="行情图表" size="small" style={{ marginTop: 16 }}>
         <StockChart />
       </Card>
     </div>

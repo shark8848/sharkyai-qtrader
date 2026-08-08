@@ -28,6 +28,15 @@ def _clean_nan(obj):
 # Training
 # ---------------------------------------------------------------------------
 
+@router.get("/train/datasets")
+async def get_train_datasets():
+    """List available datasets for training (from data catalog)."""
+    from qtrader.backend.core.data.catalog import data_catalog
+
+    datasets = data_catalog.annotate_freshness(data_catalog.list_all())
+    return datasets
+
+
 @router.get("/train/config")
 async def get_train_config():
     """Get default training configuration."""

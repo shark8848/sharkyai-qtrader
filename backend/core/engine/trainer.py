@@ -36,6 +36,7 @@ class TrainConfig(BaseModel):
     valid_range: list[str] = ["2025-01-01", "2025-06-30"]
     test_range: list[str] = ["2025-07-01", "2026-07-31"]
     model_kwargs: dict[str, Any] = {}
+    data_source: str = "qlib"  # 训练数据源: qlib(默认) / akshare / eastmoney / sina
 
 
 class LogEntry(BaseModel):
