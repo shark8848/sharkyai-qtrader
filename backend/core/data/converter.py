@@ -47,6 +47,7 @@ class Converter:
         calendar: list[str],
         freq: str = "1d",
         high_freq: bool = False,
+        source: str = "",
     ) -> int:
         """Write bars into qlib .bin layout.
 
@@ -55,6 +56,9 @@ class Converter:
             calendar: full market calendar dates ["YYYY-MM-DD", ...] (index = position).
             freq: "1d" / "1min" / ... — determines subdir layout.
             high_freq: True → write under cn_data_1min layout (features/{symbol}).
+            source: data source id ("eastmoney"/"sina"/...). When set, data is
+                written under a per-source qlib data dir (cn_data_eastmoney, ...)
+                so training can choose which channel's data to use.
 
         Returns: number of bars written.
         """
@@ -81,7 +85,13 @@ class Converter:
             return 0
 
         fname = symbol.lower()
-        base_dir = self._qlib_data_dir / ("cn_data_1min" if high_freq else "cn_data") / "features" / fname
+        # per-source data dir: cn_data / cn_data_eastmoney / cn_data_sina ...
+        sub_dir = "cn_data"
+        if high_freq:
+            sub_dir = "cn_data_1min"
+        elif source and source not in ("akshare", "qlib", "qlib_local"):
+            sub_dir = f"cn_data_{source.lower()}"
+        base_dir = self._qlib_data_dir.parent / sub_dir / "features" / fname
         base_dir.mkdir(parents=True, exist_ok=True)
 
         for field in FIELDS:

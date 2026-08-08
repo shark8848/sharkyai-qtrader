@@ -30,11 +30,46 @@ def _clean_nan(obj):
 
 @router.get("/train/datasets")
 async def get_train_datasets():
-    """List available datasets for training (from data catalog)."""
+    """List available datasets for training.
+
+    Merges DataCatalog records with a live scan of per-source qlib data
+    dirs, so the training form can show which data source actually has
+    data (default qlib cn_data vs cn_data_eastmoney / cn_data_sina).
+    """
     from qtrader.backend.core.data.catalog import data_catalog
 
     datasets = data_catalog.annotate_freshness(data_catalog.list_all())
-    return datasets
+
+    # scan per-source data dirs for real availability
+    from pathlib import Path
+
+    base = Path.home() / ".qlib" / "qlib_data"
+    sources_info = []
+    for sid, name in [("qlib", "Qlib (默认)"), ("eastmoney", "东方财富"), ("sina", "Sina")]:
+        day_dir = base / ("cn_data" if sid in ("qlib", "akshare") else f"cn_data_{sid}")
+        feats = day_dir / "features"
+        stock_count = 0
+        if feats.exists():
+            try:
+                stock_count = len([d for d in feats.iterdir() if d.is_dir()])
+            except Exception:
+                stock_count = 0
+        cal_file = day_dir / "calendars" / "day.txt"
+        cal_days = 0
+        if cal_file.exists():
+            try:
+                cal_days = len([l for l in cal_file.read_text().splitlines() if l.strip()])
+            except Exception:
+                cal_days = 0
+        sources_info.append({
+            "source_id": sid,
+            "name": name,
+            "has_data": stock_count > 0,
+            "stock_count": stock_count,
+            "calendar_days": cal_days,
+        })
+
+    return {"datasets": datasets, "sources": sources_info}
 
 
 @router.get("/train/config")

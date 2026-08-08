@@ -74,6 +74,12 @@ export const fetchDatasets = async () => {
   return res.data
 }
 
+// 训练用数据集（含各源可用性）
+export const fetchTrainDatasets = async () => {
+  const res = await axios.get('/api/train/datasets')
+  return res.data
+}
+
 export const resyncDataset = async (datasetId: string) => {
   const res = await axios.post(`/api/data/datasets/${datasetId}/resync`)
   return res.data

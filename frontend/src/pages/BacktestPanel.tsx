@@ -14,6 +14,7 @@ import {
 import axios from 'axios'
 import dayjs from 'dayjs'
 import Plot from 'react-plotly.js'
+import { fetchTrainDatasets } from '../api/data'
 
 const { RangePicker } = DatePicker
 
@@ -214,6 +215,19 @@ export default function BacktestPanel() {
   const logRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
   const currentParams: ParamDef[] = HYPERPARAMS[selectedModel] || []
+
+  // 训练数据源状态
+  const [trainSources, setTrainSources] = useState<any[]>([])
+  const [trainDatasets, setTrainDatasets] = useState<any[]>([])
+  const selectedDataSource = Form.useWatch('data_source', form)
+
+  useEffect(() => {
+    // 加载训练可用数据源（各源目录扫描）
+    fetchTrainDatasets().then(res => {
+      setTrainSources(res.sources || [])
+      setTrainDatasets(res.datasets || [])
+    }).catch(() => {})
+  }, [])
 
   // 预测弹窗状态
   const [predictOpen, setPredictOpen] = useState(false)
@@ -658,6 +672,34 @@ export default function BacktestPanel() {
               </Form.Item>
             </Col>
           </Row>
+          <Form.Item
+            label="数据源"
+            name="data_source"
+            initialValue="qlib"
+            tooltip="训练使用哪个渠道同步的数据。qlib=默认数据目录；东方财富/Sina 需先用对应源同步数据"
+          >
+            <Select
+              onChange={(val: string) => {
+                // 切换到无数据的源时提示
+                const src = trainSources.find(s => s.source_id === val)
+                if (src && !src.has_data && val !== 'qlib') {
+                  message.warning(`「${src.name}」尚未同步数据，请先在数据管理页同步，或继续用默认 qlib 数据`)
+                }
+              }}
+              options={[
+                { value: 'qlib', label: 'Qlib（默认）' },
+                ...trainSources.filter(s => s.source_id !== 'qlib').map(s => ({
+                  value: s.source_id,
+                  label: (
+                    <span>
+                      {s.name}
+                      {s.has_data ? <Tag color="success" style={{ marginLeft: 8 }}>{s.stock_count} 只</Tag> : <Tag color="warning" style={{ marginLeft: 8 }}>无数据</Tag>}
+                    </span>
+                  ),
+                })),
+              ]}
+            />
+          </Form.Item>
           <Form.Item label="股票池" name="market" initialValue="csi300" rules={[{ required: true }]}>
             <Select options={[
               { value: 'csi300', label: '沪深300' },
@@ -666,6 +708,24 @@ export default function BacktestPanel() {
               { value: 'all', label: '全市场' },
             ]} />
           </Form.Item>
+          {/* 数据源数据集状态提示 */}
+          {selectedDataSource && selectedDataSource !== 'qlib' && (
+            <div style={{ marginBottom: 16, padding: '8px 12px', background: '#fffbe6', border: '1px solid #ffe58f', borderRadius: 6, fontSize: 13 }}>
+              <span style={{ fontWeight: 500 }}>数据集状态：</span>
+              {trainDatasets.filter(d => d.source_id === selectedDataSource).length === 0 ? (
+                <span style={{ color: '#faad14' }}>该数据源暂无同步记录，将使用其数据目录（如已手动同步则忽略此提示）</span>
+              ) : (
+                trainDatasets.filter(d => d.source_id === selectedDataSource).map(d => (
+                  <div key={d.dataset_id}>
+                    <Tag color="blue">{d.market}</Tag>
+                    <Tag>{d.freq}</Tag>
+                    <span style={{ color: '#666' }}>覆盖 {d.coverage_pct}% · {d.stock_count} 只 · {d.start_date} ~ {d.end_date}</span>
+                    {d.stale && <Tag color="warning" style={{ marginLeft: 8 }}>已过期</Tag>}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
           <Form.Item label="训练集" name="train_range" initialValue={[dayjs('2019-01-01'), dayjs('2024-12-31')]}>
             <RangePicker style={{ width: '100%' }} />
           </Form.Item>

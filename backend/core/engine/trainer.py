@@ -464,7 +464,26 @@ class Trainer:
         except Exception as e:
             logger.warning(f"Failed to persist job {job.job_id}: {e}")
 
-    def _ensure_qlib(self, high_freq: bool = False):
+    def _resolve_data_dirs(self, data_source: str = "qlib"):
+        """Map a data_source id to qlib data directories.
+
+        Each source may have its own synced data dir:
+          qlib/akshare -> ~/.qlib/qlib_data/cn_data
+          eastmoney     -> ~/.qlib/qlib_data/cn_data_eastmoney
+          sina          -> ~/.qlib/qlib_data/cn_data_sina
+        """
+        from pathlib import Path
+
+        base = Path.home() / ".qlib" / "qlib_data"
+        if data_source and data_source not in ("qlib", "akshare", "qlib_local"):
+            day_dir = str(base / f"cn_data_{data_source.lower()}")
+            hf_dir = str(base / f"cn_data_{data_source.lower()}_1min")
+        else:
+            day_dir = str(base / "cn_data")
+            hf_dir = str(base / "cn_data_1min")
+        return day_dir, hf_dir
+
+    def _ensure_qlib(self, high_freq: bool = False, data_source: str = "qlib"):
         """延迟初始化 qlib，日线/高频数据源之间正确切换。
 
         高频训练会把 qlib 初始化到 cn_data_1min，之后日线训练若不切回
@@ -476,9 +495,7 @@ class Trainer:
         from qlib.constant import REG_CN
         from qlib.config import C
 
-        from pathlib import Path
-        hf_dir = str(Path.home() / ".qlib" / "qlib_data" / "cn_data_1min")
-        day_dir = self._data_dir
+        day_dir, hf_dir = self._resolve_data_dirs(data_source)
         want = hf_dir if high_freq else day_dir
 
         # 当前已注册数据源
@@ -602,7 +619,7 @@ class Trainer:
         is_high_freq = model_info.get("high_freq", False)
 
         job.update_progress(5, "正在初始化 Qlib ...")
-        self._ensure_qlib(high_freq=is_high_freq)
+        self._ensure_qlib(high_freq=is_high_freq, data_source=config.data_source)
 
         from qlib.utils import init_instance_by_config
         from qlib.workflow import R

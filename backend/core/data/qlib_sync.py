@@ -125,12 +125,20 @@ _sync_lock = threading.Lock()
 _sync_stop = threading.Event()
 
 
-def _count_disk_synced() -> int:
+def _resolve_features_dir(source_id: str = "akshare"):
+    """Resolve the features dir for a source (partitioned dirs for non-default)."""
+    if source_id and source_id not in ("akshare", "qlib", "qlib_local"):
+        return QLIB_DATA_DIR.parent / f"cn_data_{source_id.lower()}" / "features"
+    return FEATURES_DIR
+
+
+def _count_disk_synced(source_id: str = "akshare") -> int:
     """Count stocks that have .bin data on disk."""
-    if not FEATURES_DIR.exists():
+    feats = _resolve_features_dir(source_id)
+    if not feats.exists():
         return 0
     count = 0
-    for d in FEATURES_DIR.iterdir():
+    for d in feats.iterdir():
         if d.is_dir() and (d / "close.day.bin").exists():
             count += 1
     return count
@@ -179,7 +187,7 @@ def start_sync(
         _sync_task.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         _sync_task.message = f"正在初始化 ({source_id}/{market})..."
 
-    t = threading.Thread(target=_run_sync, args=(market,), daemon=True)
+    t = threading.Thread(target=_run_sync, args=(market, source_id), daemon=True)
     t.start()
     return {"message": f"同步任务已启动 (数据源: {source_id}, 股票池: {market})"}
 
@@ -198,7 +206,7 @@ def stop_sync() -> dict:
     return {"message": "已请求停止同步，将在当前股票处理完后退出"}
 
 
-def _run_sync(market: str):
+def _run_sync(market: str, source_id: str = "akshare"):
     """Main sync logic (runs in background thread).
 
     Key design: each stock is written to disk immediately after fetch.
@@ -212,8 +220,8 @@ def _run_sync(market: str):
         if not instruments:
             raise ValueError(f"无法加载股票池 {market}")
 
-        # Read existing calendar
-        existing_cal = _read_calendar()
+        # Read existing calendar (per-source dir when partitioned)
+        existing_cal = _read_calendar(source_id)
         # Never fetch beyond the safe cutoff: during trading hours the
         # current day's bar is incomplete and must not enter calendar/bins.
         fetch_end = _effective_fetch_end()
@@ -221,14 +229,14 @@ def _run_sync(market: str):
 
         # Step 1: Discover new trading dates by fetching a liquid stock (贵州茅台)
         _sync_task.message = "正在获取最新交易日历..."
-        new_cal = _update_calendar(existing_cal, full_start, fetch_end)
+        new_cal = _update_calendar(existing_cal, full_start, fetch_end, source_id)
         _sync_task.new_dates = len(new_cal) - len(existing_cal)
         cal_index = {d: i for i, d in enumerate(new_cal)}
         logger.info(f"Calendar: {len(existing_cal)} -> {len(new_cal)} days (+{_sync_task.new_dates})")
 
         # Step 2: Pre-filter — only keep stocks that actually need syncing
         _sync_task.message = "正在检查哪些股票需要同步..."
-        pending = [s for s in instruments if not _stock_is_current(s, len(new_cal))]
+        pending = [s for s in instruments if not _stock_is_current(s, len(new_cal), source_id)]
         already_done = len(instruments) - len(pending)
         logger.info(f"Pre-filter: {len(pending)} need sync, {already_done} already current")
 
@@ -245,7 +253,7 @@ def _run_sync(market: str):
 
         _sync_task.total_stocks = len(pending)
         _sync_task.skip_stocks = len(instruments) - len(pending)
-        _sync_task.base_synced = _count_disk_synced()
+        _sync_task.base_synced = _count_disk_synced(source_id)
 
         if not pending:
             ckpt.finish()
@@ -267,11 +275,11 @@ def _run_sync(market: str):
                 logger.info(f"Sync stopped by request after {i} stocks")
                 break
             try:
-                bars = _fetch_stock_kline_bars(symbol, full_start, fetch_end)
+                bars = _fetch_bars_by_source(symbol, full_start, fetch_end, source_id)
                 if bars:
                     # 统一走 StandardBar → Converter 写入（amount 不再丢失）
                     from qtrader.backend.core.data.converter import converter
-                    converter.to_qlib_bin(bars, new_cal)
+                    converter.to_qlib_bin(bars, new_cal, source=source_id)
                     success_count += 1
                     _sync_task.success_stocks = success_count
                     ckpt.mark_done(symbol)
@@ -333,7 +341,7 @@ def _run_sync(market: str):
         _sync_task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _stock_is_current(symbol: str, cal_len: int) -> bool:
+def _stock_is_current(symbol: str, cal_len: int, source_id: str = "akshare") -> bool:
     """Check if a stock's .bin data already covers recent calendar dates.
 
     Both close and amount must reach the last calendar date: amount was
@@ -341,8 +349,9 @@ def _stock_is_current(symbol: str, cal_len: int) -> bool:
     truncated amount.day.bin must stay in the pending list.
     """
     fname = symbol.lower()
+    feats = _resolve_features_dir(source_id)
     for field in ("close", "amount"):
-        bin_path = FEATURES_DIR / fname / f"{field}.day.bin"
+        bin_path = feats / fname / f"{field}.day.bin"
         if not bin_path.exists():
             return False
         try:
@@ -361,7 +370,7 @@ def _stock_is_current(symbol: str, cal_len: int) -> bool:
     return True
 
 
-def _update_calendar(existing_cal: list[str], start: str, end: str) -> list[str]:
+def _update_calendar(existing_cal: list[str], start: str, end: str, source_id: str = "akshare") -> list[str]:
     """Fetch trading calendar from a liquid stock and merge with existing."""
     import akshare as ak
 
@@ -403,8 +412,13 @@ def _update_calendar(existing_cal: list[str], start: str, end: str) -> list[str]
             f"Calendar: stripped {len(future_dates)} dates beyond {cutoff_str} "
             f"({future_dates[0]} ~ {future_dates[-1]}), calendar now ends at {all_dates[-1] if all_dates else 'N/A'}"
         )
-    CALENDARS_DIR.mkdir(parents=True, exist_ok=True)
-    cal_file = CALENDARS_DIR / "day.txt"
+    # 日历写入与数据同目录（source 分区时写到对应源的数据目录）
+    if source_id and source_id not in ("akshare", "qlib", "qlib_local"):
+        cal_dir = QLIB_DATA_DIR.parent / f"cn_data_{source_id.lower()}" / "calendars"
+    else:
+        cal_dir = CALENDARS_DIR
+    cal_dir.mkdir(parents=True, exist_ok=True)
+    cal_file = cal_dir / "day.txt"
     with open(cal_file, "w") as f:
         for d in all_dates:
             f.write(d + "\n")
@@ -523,9 +537,12 @@ def _fetch_all_stock_symbols() -> list[str]:
         return []
 
 
-def _read_calendar() -> list[str]:
-    """Read existing calendar dates."""
-    cal_file = CALENDARS_DIR / "day.txt"
+def _read_calendar(source_id: str = "akshare") -> list[str]:
+    """Read existing calendar dates (per-source when partitioned)."""
+    if source_id and source_id not in ("akshare", "qlib", "qlib_local"):
+        cal_file = QLIB_DATA_DIR.parent / f"cn_data_{source_id.lower()}" / "calendars" / "day.txt"
+    else:
+        cal_file = CALENDARS_DIR / "day.txt"
     if not cal_file.exists():
         return []
     with open(cal_file) as f:
@@ -590,6 +607,52 @@ def _fetch_stock_kline_bars(
     if df is None or df.empty:
         return []
     return bars_from_dataframe(df, symbol, freq="1d", adjusted="hfq", source_id="sina")
+
+
+def _fetch_bars_by_source(
+    symbol: str, start: str, end: str, source_id: str = "akshare"
+) -> list:
+    """Fetch StandardBar rows from the requested data channel.
+
+    source_id selects which underlying API pulls the data:
+      - akshare / qlib: sina-based daily fetch (existing default)
+      - eastmoney: EastMoney push2his daily history (stock_zh_a_hist)
+      - sina: sina daily (explicit)
+
+    All paths return StandardBar rows with source_id set, so the converter
+    writes them into the matching per-source qlib data dir.
+    """
+    from qtrader.backend.core.data.schema import bars_from_dataframe
+
+    if source_id == "eastmoney":
+        try:
+            import akshare as ak
+
+            pure = symbol.replace("SH", "").replace("SZ", "").replace(".", "")
+            df = ak.stock_zh_a_hist(
+                symbol=pure,
+                period="daily",
+                start_date=start.replace("-", ""),
+                end_date=end.replace("-", ""),
+                adjust="hfq",
+                timeout=30,
+            )
+            if df is not None and not df.empty:
+                std = pd.DataFrame({
+                    "date": pd.to_datetime(df["日期"]).dt.strftime("%Y-%m-%d"),
+                    "open": df["开盘"].astype(float),
+                    "high": df["最高"].astype(float),
+                    "low": df["最低"].astype(float),
+                    "close": df["收盘"].astype(float),
+                    "volume": df["成交量"].astype(float),
+                    "amount": df["成交额"].astype(float),
+                })
+                return bars_from_dataframe(std, symbol, freq="1d", adjusted="hfq", source_id="eastmoney")
+        except Exception as e:
+            logger.warning(f"EastMoney fetch {symbol} failed ({e}), fallback to sina")
+
+    # default: sina-based daily fetch (also covers akshare / sina / fallback)
+    return _fetch_stock_kline_bars(symbol, start, end)
 
 
 def _update_instruments(instruments: list[str], calendar: list[str]):
