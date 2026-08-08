@@ -307,7 +307,7 @@ def _run_sync(market: str, source_id: str = "akshare"):
                 )
 
         # Step 4: Update instruments file
-        _update_instruments(instruments, new_cal)
+        _update_instruments(instruments, new_cal, source_id)
 
         total_skipped = len(instruments) - len(pending)
         if _sync_stop.is_set():
@@ -655,15 +655,25 @@ def _fetch_bars_by_source(
     return _fetch_stock_kline_bars(symbol, start, end)
 
 
-def _update_instruments(instruments: list[str], calendar: list[str]):
-    """Update instruments file with extended end dates."""
+def _update_instruments(instruments: list[str], calendar: list[str], source_id: str = "akshare"):
+    """Update instruments file with extended end dates (per-source when partitioned).
+
+    qlib training resolves the instruments file from the same provider_uri
+    as the features. A per-source data dir therefore needs its own
+    instruments/all.txt, otherwise training fails with
+    "instrument not exists: .../cn_data_eastmoney/instruments/all.txt".
+    """
     if not calendar:
         return
     end_date = calendar[-1]
     start_date = calendar[0]
 
-    INSTRUMENTS_DIR.mkdir(parents=True, exist_ok=True)
-    all_file = INSTRUMENTS_DIR / "all.txt"
+    if source_id and source_id not in ("akshare", "qlib", "qlib_local"):
+        inst_dir = QLIB_DATA_DIR.parent / f"cn_data_{source_id.lower()}" / "instruments"
+    else:
+        inst_dir = INSTRUMENTS_DIR
+    inst_dir.mkdir(parents=True, exist_ok=True)
+    all_file = inst_dir / "all.txt"
     with open(all_file, "w") as f:
         for sym in instruments:
             f.write(f"{sym}\t{start_date}\t{end_date}\n")
