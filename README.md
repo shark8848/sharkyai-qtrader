@@ -1,5 +1,9 @@
 # QTrader
 
+<p align="center">
+  <img src="docs/qtrader-banner.svg" alt="QTrader Banner" width="100%">
+</p>
+
 **[中文](#中文)** | **[English](#english)**
 
 ---
