@@ -26,22 +26,26 @@ class DataManager:
         self._active_source_id: str = ""
 
     async def initialize(self):
-        """Register built-in data sources on startup."""
+        """Register built-in data sources on startup (multi-source, non-exclusive)."""
         from qtrader.backend.core.data.akshare_source import AKShareSource
         from qtrader.backend.core.data.qlib_source import QlibSource
+        from qtrader.backend.core.data.eastmoney_source import EastMoneySource
+        from qtrader.backend.core.data.sina_source import SinaSource
+        from qtrader.backend.core.data.baostock_source import BaostockSource
         from qtrader.backend.config import settings
 
-        akshare = AKShareSource()
-        qlib = QlibSource()
-        self.register(akshare)
-        self.register(qlib)
+        self.register(AKShareSource())
+        self.register(EastMoneySource())
+        self.register(SinaSource())
+        self.register(BaostockSource())
+        self.register(QlibSource())
 
-        # Set default active source
+        # Set default active source (query default only — sources are NOT exclusive)
         if settings.default_data_source in self._sources:
             self._active_source_id = settings.default_data_source
         elif self._sources:
             self._active_source_id = next(iter(self._sources))
-        logger.info(f"DataManager initialized. Active source: {self._active_source_id}")
+        logger.info(f"DataManager initialized. Active (query default): {self._active_source_id}")
 
     async def shutdown(self):
         """Cleanup on application shutdown."""
@@ -53,14 +57,27 @@ class DataManager:
         logger.info(f"Registered data source: {source.source_id} ({source.name})")
 
     def list_sources(self) -> list[dict]:
-        """List all registered data sources."""
+        """List all registered data sources (multi-source, non-exclusive)."""
         result = []
         for sid, src in self._sources.items():
             result.append({
                 "id": sid,
                 "name": src.name,
                 "active": sid == self._active_source_id,
+                "capabilities": sorted(getattr(src, "capabilities", set())),
+                "data_format": getattr(src, "data_format", "api"),
             })
+        return result
+
+    async def health_check_all(self) -> list[dict]:
+        """Run health checks on all sources (async)."""
+        result = []
+        for sid, src in self._sources.items():
+            try:
+                ok = await src.health_check()
+            except Exception:
+                ok = False
+            result.append({"id": sid, "name": src.name, "healthy": ok})
         return result
 
     def switch_source(self, source_id: str) -> bool:

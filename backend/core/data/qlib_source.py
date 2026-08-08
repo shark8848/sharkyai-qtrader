@@ -48,6 +48,14 @@ class QlibSource(DataSource):
     def source_id(self) -> str:
         return "qlib"
 
+    @property
+    def capabilities(self) -> set[str]:
+        return {"daily", "minute"}
+
+    @property
+    def data_format(self) -> str:
+        return "local_bin"
+
     def _ensure_qlib_init(self):
         """Lazily initialize qlib if not already done."""
         import qlib

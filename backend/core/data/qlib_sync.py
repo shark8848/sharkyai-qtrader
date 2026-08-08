@@ -154,8 +154,21 @@ def get_sync_status() -> dict:
     return d
 
 
-def start_sync(market: str = "all") -> dict:
-    """Start a background sync task."""
+def start_sync(
+    market: str = "all",
+    source_id: str = "akshare",
+    freq: str = "daily",
+    target: str = "qlib_bin",
+) -> dict:
+    """Start a background sync task.
+
+    Args:
+        market: stock pool ("all" / "csi300" / ...).
+        source_id: data channel (default "akshare"; "sina"/"eastmoney" etc.
+            map to the same sina-based fetch for now).
+        freq: "daily" (default) or "1min" (future).
+        target: storage target, "qlib_bin" (default).
+    """
     global _sync_task
     with _sync_lock:
         if _sync_task.status == "running":
@@ -164,11 +177,11 @@ def start_sync(market: str = "all") -> dict:
         _sync_task = QlibSyncTask()
         _sync_task.status = "running"
         _sync_task.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _sync_task.message = "正在初始化..."
+        _sync_task.message = f"正在初始化 ({source_id}/{market})..."
 
     t = threading.Thread(target=_run_sync, args=(market,), daemon=True)
     t.start()
-    return {"message": f"同步任务已启动 (股票池: {market})"}
+    return {"message": f"同步任务已启动 (数据源: {source_id}, 股票池: {market})"}
 
 
 def stop_sync() -> dict:
@@ -254,9 +267,11 @@ def _run_sync(market: str):
                 logger.info(f"Sync stopped by request after {i} stocks")
                 break
             try:
-                df = _fetch_stock_kline(symbol, full_start, fetch_end)
-                if df is not None and not df.empty:
-                    _write_stock_bins(symbol, df, cal_index)
+                bars = _fetch_stock_kline_bars(symbol, full_start, fetch_end)
+                if bars:
+                    # 统一走 StandardBar → Converter 写入（amount 不再丢失）
+                    from qtrader.backend.core.data.converter import converter
+                    converter.to_qlib_bin(bars, new_cal)
                     success_count += 1
                     _sync_task.success_stocks = success_count
                     ckpt.mark_done(symbol)
@@ -558,6 +573,23 @@ def _fetch_stock_kline(symbol: str, start: str, end: str, max_retries: int = 3) 
     # real values from the data source instead.
 
     return df
+
+
+def _fetch_stock_kline_bars(
+    symbol: str, start: str, end: str, max_retries: int = 3
+) -> list:
+    """Fetch daily kline and return StandardBar rows (unified schema).
+
+    This is the StandardBar-based path replacing the raw DataFrame return.
+    The converter writes these bars into .bin so amount can never be
+    silently dropped again.
+    """
+    from qtrader.backend.core.data.schema import bars_from_dataframe
+
+    df = _fetch_stock_kline(symbol, start, end, max_retries)
+    if df is None or df.empty:
+        return []
+    return bars_from_dataframe(df, symbol, freq="1d", adjusted="hfq", source_id="sina")
 
 
 def _update_instruments(instruments: list[str], calendar: list[str]):
