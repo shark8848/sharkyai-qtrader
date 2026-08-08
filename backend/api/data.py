@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from qtrader.backend.core.data.manager import data_manager
-from qtrader.backend.core.data.qlib_sync import start_sync, get_sync_status
+from qtrader.backend.core.data.qlib_sync import start_sync, stop_sync, get_sync_status
 from qtrader.backend.core.data.local_reader import read_local_kline, read_raw_kline
 from qtrader.backend.core.data.minute_sync import (
     start_minute_sync,
@@ -104,6 +104,12 @@ async def sync_qlib(market: str = Query("all", description="Stock pool to sync")
 async def sync_qlib_status():
     """Get the current sync task progress."""
     return get_sync_status()
+
+
+@router.post("/sync_qlib/stop")
+async def sync_qlib_stop():
+    """Request a clean stop of the running sync task (keeps checkpoint)."""
+    return stop_sync()
 
 
 # === Minute-level data endpoints ===

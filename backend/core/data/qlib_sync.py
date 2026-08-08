@@ -17,10 +17,38 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import requests
 
 from .checkpoint import SyncCheckpoint
 
 logger = logging.getLogger(__name__)
+
+
+def _patch_requests_timeout(default: tuple = (10, 30)) -> None:
+    """Force a timeout on every akshare HTTP call.
+
+    akshare's stock_zh_a_daily() uses requests.get() with NO timeout, so a
+    hung upstream (sina) blocks the sync thread forever. This patches
+    Session.request so any call without an explicit timeout gets
+    (connect=10s, read=30s); a timeout then surfaces as an exception that
+    _fetch_stock_kline retries and eventually skips, keeping sync alive.
+    """
+    import requests.adapters
+
+    _orig_request = requests.Session.request
+
+    def _request_with_timeout(self, method, url, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = default
+        return _orig_request(self, method, url, **kwargs)
+
+    # Only patch once; keep it idempotent across module reloads.
+    if not getattr(requests.Session, "_qtrader_timeout_patched", False):
+        requests.Session.request = _request_with_timeout
+        requests.Session._qtrader_timeout_patched = True
+
+
+_patch_requests_timeout()
 
 QLIB_DATA_DIR = Path.home() / ".qlib" / "qlib_data" / "cn_data"
 CALENDARS_DIR = QLIB_DATA_DIR / "calendars"
@@ -91,6 +119,10 @@ class QlibSyncTask:
 # Global sync task (only one at a time)
 _sync_task = QlibSyncTask()
 _sync_lock = threading.Lock()
+# Cooperative stop flag: set to abort the running sync cleanly after the
+# current stock finishes. Completed stocks stay in checkpoint, so a later
+# run resumes where it left off.
+_sync_stop = threading.Event()
 
 
 def _count_disk_synced() -> int:
@@ -128,6 +160,7 @@ def start_sync(market: str = "all") -> dict:
     with _sync_lock:
         if _sync_task.status == "running":
             return {"error": "同步任务正在运行中，请等待完成"}
+        _sync_stop.clear()
         _sync_task = QlibSyncTask()
         _sync_task.status = "running"
         _sync_task.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -136,6 +169,20 @@ def start_sync(market: str = "all") -> dict:
     t = threading.Thread(target=_run_sync, args=(market,), daemon=True)
     t.start()
     return {"message": f"同步任务已启动 (股票池: {market})"}
+
+
+def stop_sync() -> dict:
+    """Request a clean stop of the running sync task.
+
+    Sets the cooperative stop flag; the sync loop exits after the current
+    stock finishes, keeping already-completed stocks in checkpoint. The
+    status flips to 'done' (not 'error') since a stop is a normal exit.
+    """
+    with _sync_lock:
+        if _sync_task.status != "running":
+            return {"message": "没有正在运行的同步任务"}
+        _sync_stop.set()
+    return {"message": "已请求停止同步，将在当前股票处理完后退出"}
 
 
 def _run_sync(market: str):
@@ -203,6 +250,9 @@ def _run_sync(market: str):
         fail_count = 0
 
         for i, symbol in enumerate(pending):
+            if _sync_stop.is_set():
+                logger.info(f"Sync stopped by request after {i} stocks")
+                break
             try:
                 df = _fetch_stock_kline(symbol, full_start, fetch_end)
                 if df is not None and not df.empty:
@@ -237,15 +287,28 @@ def _run_sync(market: str):
         _update_instruments(instruments, new_cal)
 
         total_skipped = len(instruments) - len(pending)
-        ckpt.finish()
+        if _sync_stop.is_set():
+            # Keep the checkpoint file on stop so a later run resumes from
+            # where we left off. finish() would delete it and lose progress.
+            ckpt._flush()
+        else:
+            ckpt.finish()
         _sync_task.status = "done"
         _sync_task.progress = 100
-        _sync_task.message = (
-            f"同步完成: {success_count} 只写入, {total_skipped} 只已是最新, "
-            f"{fail_count} 只失败, 日历至 {last_cal_date}"
-        )
+        if _sync_stop.is_set():
+            _sync_task.message = (
+                f"同步已停止: {success_count} 只写入, {fail_count} 只失败, "
+                f"剩余 {len(pending) - (i + 1)} 只待处理"
+            )
+        else:
+            _sync_task.message = (
+                f"同步完成: {success_count} 只写入, {total_skipped} 只已是最新, "
+                f"{fail_count} 只失败, 日历至 {last_cal_date}"
+            )
         _sync_task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        logger.info(f"Qlib sync done: {success_count} written, {total_skipped} skipped, {fail_count} failed")
+        logger.info(
+            f"Qlib sync done: {success_count} written, {total_skipped} skipped, {fail_count} failed"
+        )
 
     except Exception as e:
         logger.exception("Qlib sync failed")
@@ -421,12 +484,16 @@ def _fetch_all_stock_symbols() -> list[str]:
         symbols = []
         for code in df["code"].astype(str):
             code = code.strip()
+            # NOTE: sina stock_zh_a_daily does NOT support BSE (北交所,
+            # codes starting 4/8/9). Including them makes every fetch fail
+            # with JSONDecodeError and pollutes fail counts, so skip them.
+            # The qlib all.txt has never contained BJ stocks for this reason.
+            if code.startswith(("4", "8", "9")):
+                continue
             if code.startswith("6"):
                 symbols.append(f"SH{code}")
             elif code.startswith(("0", "3")):
                 symbols.append(f"SZ{code}")
-            elif code.startswith(("4", "8")):
-                symbols.append(f"BJ{code}")
             else:
                 symbols.append(f"SZ{code}")
         logger.info(f"Fetched {len(symbols)} stocks from AKShare")
@@ -478,7 +545,10 @@ def _fetch_stock_kline(symbol: str, start: str, end: str, max_retries: int = 3) 
 
     # stock_zh_a_daily returns: date, open, high, low, close, volume, amount
     df = df.reset_index() if "date" not in df.columns else df
-    needed = ["date", "open", "high", "low", "close", "volume"]
+    # NOTE: amount MUST be kept — _stock_is_current requires amount coverage
+    # to the latest calendar day. Dropping it here made every re-sync
+    # rewrite all stocks forever (amount.day.bin never reached the tail).
+    needed = ["date", "open", "high", "low", "close", "volume", "amount"]
     available = [c for c in needed if c in df.columns]
     df = df[available].copy()
     df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
